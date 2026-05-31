@@ -1,12 +1,13 @@
 """
 多宫格训练视图 - 同时监控多个训练局
-在一个pygame窗口中显示 NxN 个训练画面
+使用 ThreadPoolExecutor 并行加速 (PyMunk+PyTorch 均释放GIL)
 """
 import os
 import time
 import math
 import pygame
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from game_config import *
 from fencing_game import FencingGame
@@ -14,7 +15,7 @@ from dqn_agent import DQNAgent
 
 
 class MultiGameViewer:
-    """多宫格训练视图管理器"""
+    """多宫格训练视图管理器 (并行加速版)"""
     
     def __init__(self, grid_size=(2, 2), render=True):
         """
@@ -67,48 +68,59 @@ class MultiGameViewer:
             self.agents_p2.append(DQNAgent(RL['state_dim'], RL['action_dim']))
         
         # 统计
-        self.total_episodes = 0
+        self.total_steps = 0
         self.start_time = time.time()
         self.model_dir = os.path.join(os.path.dirname(__file__), 'models')
         os.makedirs(self.model_dir, exist_ok=True)
     
+    def _train_one_game(self, idx, should_optimize, should_update_target):
+        """训练单个游戏一步 (供线程池调用)"""
+        game = self.games[idx]
+        ap1 = self.agents_p1[idx]
+        ap2 = self.agents_p2[idx]
+        
+        state = game._cached_state if hasattr(game, '_cached_state') else game.reset()
+        
+        action1 = ap1.select_action(state)
+        state_p2 = game._get_state(perspective=2)
+        action2 = ap2.select_action(state_p2)
+        
+        ns1, r1, ns2, r2, done, info = game.step(action1, action2)
+        
+        ap1.store_transition(state, action1, ns1, r1)
+        ap2.store_transition(state_p2, action2, ns2, r2)
+        
+        if should_optimize:
+            ap1.optimize_model()
+            ap2.optimize_model()
+        
+        if should_update_target:
+            ap1.soft_update_target()
+            ap2.soft_update_target()
+        
+        game._cached_state = ns1
+        if done:
+            game._cached_state = game.reset()
+        
+        return done
+    
     def train_one_step(self):
-        """所有游戏同时步进一步 (带优化节流)"""
-        done_flags = []
-        should_optimize = (self.total_episodes % 3 == 0)  # 每3步优化一次
-        should_update_target = (self.total_episodes % RL['target_update'] == 0)
+        """所有游戏并行步进一步 (ThreadPoolExecutor加速)"""
+        should_optimize = (self.total_steps % 3 == 0)
+        should_update_target = (self.total_steps % RL['target_update'] == 0)
         
-        for idx in range(self.num_games):
-            game = self.games[idx]
-            ap1 = self.agents_p1[idx]
-            ap2 = self.agents_p2[idx]
-            
-            state = game._cached_state if hasattr(game, '_cached_state') else game.reset()
-            
-            action1 = ap1.select_action(state)
-            state_p2 = game._get_state(perspective=2)
-            action2 = ap2.select_action(state_p2)
-            
-            ns1, r1, ns2, r2, done, info = game.step(action1, action2)
-            
-            ap1.store_transition(state, action1, ns1, r1)
-            ap2.store_transition(state_p2, action2, ns2, r2)
-            
-            if should_optimize:
-                ap1.optimize_model()
-                ap2.optimize_model()
-            
-            if should_update_target:
-                ap1.soft_update_target()
-                ap2.soft_update_target()
-            
-            game._cached_state = ns1
-            done_flags.append(done)
-            
-            if done:
-                game._cached_state = game.reset()
+        # 使用线程池并行执行 (PyMunk物理+PyTorch GPU均释放GIL)
+        with ThreadPoolExecutor(max_workers=self.num_games) as executor:
+            futures = {
+                executor.submit(self._train_one_game, idx, should_optimize, should_update_target): idx
+                for idx in range(self.num_games)
+            }
+            done_flags = [False] * self.num_games
+            for future in as_completed(futures):
+                idx = futures[future]
+                done_flags[idx] = future.result()
         
-        self.total_episodes += 1
+        self.total_steps += 1
         return any(done_flags)
     
     def render_all(self):
@@ -116,9 +128,11 @@ class MultiGameViewer:
         if not self.render:
             return True
         
-        # 处理事件
+        # 处理事件 (含ESC退出)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 return False
         
         # 每个游戏自己渲染到子表面
@@ -136,7 +150,7 @@ class MultiGameViewer:
             game = self.games[idx]
             ap1 = self.agents_p1[idx]
             info_text = [
-                f"#{idx+1} Ep:{self.total_episodes}",
+                f"#{idx+1} Step:{self.total_steps}",
                 f"P1:{game.player1.health:.0f} P2:{game.player2.health:.0f}",
                 f"Mem:{len(ap1.memory)}",
             ]
@@ -147,7 +161,7 @@ class MultiGameViewer:
         # 全局状态栏
         elapsed = time.time() - self.start_time
         stats = self.font.render(
-            f"Total Steps: {self.total_episodes} | Time: {elapsed:.0f}s | Games: {self.num_games} | ESC=退出",
+            f"Total Steps: {self.total_steps} | Time: {elapsed:.0f}s | Games: {self.num_games} | ESC=退出",
             True, (180, 180, 200))
         self.screen.blit(stats, (10, self.win_h - 20))
         
@@ -178,7 +192,7 @@ class MultiGameViewer:
         
         self._save_models()
         total_time = time.time() - self.start_time
-        print(f"💾 训练结束! 总步数: {self.total_episodes}, 用时: {total_time:.0f}s")
+        print(f"💾 训练结束! 总步数: {self.total_steps}, 用时: {total_time:.0f}s")
         pygame.quit()
     
     def _save_models(self):

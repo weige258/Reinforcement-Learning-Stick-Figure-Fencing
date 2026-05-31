@@ -495,22 +495,15 @@ class StickMan:
             self.bodies['forearm_r'].angular_velocity = -2 * self.facing
     
     def move(self, direction):
-        """移动: direction = -1 (左/后退), 0 (停止), 1 (右/前进)"""
+        """移动: 速度驱动, 避免Teleport撕裂关节"""
         if self.stun_timer > 0:
             return
         
-        if direction != 0:
-            delta = FIGHT['move_speed'] * direction * self.facing / FPS  # per frame
-            for name, body in self.bodies.items():
-                body.position = (body.position.x + delta, body.position.y)
-                # 让腿稍微抬高模拟走路
-                if name in ['thigh_r', 'shin_r']:
-                    body.position = (body.position.x, body.position.y - 2)
-                elif name in ['thigh_l', 'shin_l']:
-                    body.position = (body.position.x, body.position.y - 1)
-            # 剑也跟着移动
-            if hasattr(self, 'sword_body'):
-                self.sword_body.position = (self.sword_body.position.x + delta, self.sword_body.position.y)
+        target_vx = FIGHT['move_speed'] * direction * self.facing
+        for name, body in self.bodies.items():
+            body.velocity = (target_vx, body.velocity.y)
+        if hasattr(self, 'sword_body'):
+            self.sword_body.velocity = (target_vx, self.sword_body.velocity.y)
     
     def _apply_move_velocity(self, body, gravity, damping, dt):
         """自定义速度函数 - 移动由move()直接处理, 同时稳定躯干姿态"""
@@ -614,17 +607,17 @@ class StickMan:
         self.damage_dealt_this_step = 0
     
     def remove_from_space(self):
-        """从物理空间移除"""
-        for shape in self.shapes:
-            if shape in self.space.shapes:
-                self.space.remove(shape)
-        for body in self.bodies.values():
-            if body in self.space.bodies:
-                self.space.remove(body)
+        """从物理空间移除 (先joints, 再shapes, 最后bodies)"""
         for joint in self.joints:
             if joint in self.space.constraints:
                 self.space.remove(joint)
         if hasattr(self, 'sword_shape') and self.sword_shape in self.space.shapes:
             self.space.remove(self.sword_shape)
+        for shape in self.shapes:
+            if shape in self.space.shapes:
+                self.space.remove(shape)
         if hasattr(self, 'sword_body') and self.sword_body in self.space.bodies:
             self.space.remove(self.sword_body)
+        for body in self.bodies.values():
+            if body in self.space.bodies:
+                self.space.remove(body)

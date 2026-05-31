@@ -174,7 +174,7 @@ class DQNAgent:
         non_final_next_states = torch.tensor(
             [s for s in next_states_norm if s is not None],
             dtype=torch.float32, device=self.device
-        )
+        ).view(-1, self.state_dim)  # ★ 确保二维, 防空batch崩溃
         
         # 拼接批数据
         state_batch = torch.tensor(states_norm, dtype=torch.float32, device=self.device)
@@ -230,7 +230,7 @@ class DQNAgent:
     
     def load(self, filepath):
         """加载模型 (含归一化器状态)"""
-        checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
         self.policy_net.load_state_dict(checkpoint['policy_net'])
         self.target_net.load_state_dict(checkpoint['target_net'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -243,8 +243,11 @@ class DQNAgent:
         print(f"Model loaded from {filepath}")
     
     def store_transition(self, state, action, next_state, reward):
-        """存储经验 (存储原始状态, select_action时归一化)"""
+        """存储经验 + 更新归一化统计"""
         self.memory.push(state, action, next_state, reward)
+        # 每步更新归一化统计
+        self.state_normalizer.update(np.array([state], dtype=np.float32))
+        self.norm_count += 1
     
     def _norm_batch(self, states_list):
         """批量归一化状态列表"""

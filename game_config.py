@@ -95,7 +95,7 @@ COLLISION_TYPES = {
 RL = {
     'state_dim': 29,
     'action_dim': 7,
-    'hidden_dim': 256,
+    'hidden_dim': 128,
     'learning_rate': 3e-4,
     'gamma': 0.99,
     'batch_size': 128,
@@ -110,17 +110,7 @@ RL = {
 }
 
 # 动作定义
-ACTIONS = [
-    'idle',
-    'attack_high_right',
-    'attack_low_right',
-    'attack_high_left',
-    'attack_low_left',
-    'block',
-    'move_forward',
-    'move_backward',
-]
-# 实际使用的动作数 (不包括idle的组合)
+# 动作索引-功能映射 (7个离散动作)
 NUM_ACTIONS = 7
 
 # 动作映射

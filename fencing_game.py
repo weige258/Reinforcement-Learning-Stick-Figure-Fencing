@@ -195,10 +195,6 @@ class FencingGame:
         for _ in range(PHYSICS_STEPS):
             self.space.step(sub_dt)
         
-        # 更新角色状态
-        self.player1.update(dt)
-        self.player2.update(dt)
-        
         # 防止角色走出屏幕 (用冲量方式)
         self._clamp_positions()
         
@@ -223,8 +219,12 @@ class FencingGame:
                 self.winner = self.player2
                 self.p2_score += 1
         
-        # 计算奖励 (含塑形奖励)
+        # ★ 先算奖励 (此时 damage_dealt_this_step 仍有效)
         reward1, reward2 = self._calculate_rewards(done)
+        
+        # ★ 再更新状态 (含清零 damage_dealt_this_step)
+        self.player1.update(dt)
+        self.player2.update(dt)
         
         # 各自视角的状态
         state1 = self._get_state(perspective=1)
@@ -393,6 +393,8 @@ class FencingGame:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    return False
         
         w, h = surf.get_size()
         # 缩放比例: 如果render_surface尺寸与标准不同
@@ -519,33 +521,11 @@ class FencingGame:
             t2 = f.render(f"{int(self.player2.health)}", True, (255,255,255))
             surf.blit(t2, (x2 + int(5*sx), by + int(2*sy)))
     
-    def _draw_mouse_trail(self):
-        """绘制鼠标拖拽轨迹"""
-        if not hasattr(self, '_prev_mouse'):
-            return
-        surf = self.get_surface()
-        if surf is None:
-            return
-        mx, my = pygame.mouse.get_pos()
-        cx = int(self.player1.get_center_x())
-        cy = int(self.player1.get_center_y())
-        for i in range(0, 100, 8):
-            t = i / 100
-            x = int(cx + (mx - cx) * t)
-            y = int(cy + (my - cy) * t)
-            pygame.draw.circle(surf, (255, 255, 100, 128), (x, y), 2)
-        pygame.draw.circle(surf, (255, 200, 50), (mx, my), 8, 2)
-        pygame.draw.circle(surf, (255, 200, 50, 64), (mx, my), 15, 1)
-    
-    def _draw_ui(self):
+    def _draw_ui(self, surf):
         """绘制UI"""
         if not self.font_small:
             return
-        surf = self.get_surface()
-        if surf is None:
-            return
         w = surf.get_width()
-        
         score_text = self.font_small.render(
             f"P1:{self.p1_score} P2:{self.p2_score}",
             True, COLORS['ui_text'])
@@ -633,10 +613,6 @@ class FencingGame:
         for _ in range(PHYSICS_STEPS):
             self.space.step(sub_dt)
         
-        # 更新角色状态
-        self.player1.update(dt)
-        self.player2.update(dt)
-        
         # 防止走出屏幕
         self._clamp_positions()
         
@@ -667,6 +643,10 @@ class FencingGame:
                 reward = 10
             elif self.winner == self.player2:
                 reward = -10
+        
+        # ★ 先算奖励再update(清零)
+        self.player1.update(dt)
+        self.player2.update(dt)
         
         state = self._get_state(perspective=1)
         info = {

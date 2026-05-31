@@ -190,7 +190,7 @@ class Trainer:
               f"P2={self.p2_wins/max(episode,1)*100:.1f}%")
         print(f"{'=' * 80}")
     
-    def save_models(self, tag=""):
+    def save_models(self):
         """保存模型 (只保留1份, 覆盖旧文件)"""
         self.agent_p1.save(os.path.join(self.model_dir, "agent_p1_best.pth"))
         self.agent_p2.save(os.path.join(self.model_dir, "agent_p2_best.pth"))
