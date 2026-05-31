@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 模型文件 (训练生成, 体积大)
+models/
+*.pth
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+Thumbs.db
+.DS_Store
