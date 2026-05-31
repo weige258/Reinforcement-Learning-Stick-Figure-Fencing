@@ -1,6 +1,6 @@
 """
 深度Q学习(DQN)智能体 - 用于火柴人击剑格斗
-基于 PyTorch 实现，包含经验回放和目标网络
+基于 PyTorch 实现，包含经验回放、目标网络、RunningMeanStd归一化
 """
 import random
 import math
@@ -10,11 +10,44 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import numpy as np
 
 from game_config import RL
 
 # 经验回放单元
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
+
+
+class RunningMeanStd:
+    """在线状态归一化 - 追踪运行的均值和标准差"""
+    def __init__(self, shape=29, epsilon=1e-8):
+        self.mean = np.zeros(shape, dtype=np.float32)
+        self.var = np.ones(shape, dtype=np.float32)
+        self.count = epsilon
+        self.epsilon = epsilon
+
+    def update(self, x):
+        """更新统计量"""
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta ** 2 * self.count * batch_count / tot_count
+        new_var = M2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
+    def normalize(self, x):
+        """归一化到近似N(0,1)"""
+        return (x - self.mean) / (np.sqrt(self.var) + self.epsilon)
 
 
 class ReplayMemory:
@@ -78,8 +111,6 @@ class DQNAgent:
         else:
             self.device = device
         
-        # print(f"DQN Agent using device: {self.device}")  # 静默初始化
-        
         # Q网络
         self.policy_net = DQN(state_dim, action_dim, RL['hidden_dim']).to(self.device)
         self.target_net = DQN(state_dim, action_dim, RL['hidden_dim']).to(self.device)
@@ -92,6 +123,10 @@ class DQNAgent:
         # 经验回放
         self.memory = ReplayMemory(RL['memory_size'])
         
+        # RunningMeanStd状态归一化
+        self.state_normalizer = RunningMeanStd(shape=state_dim)
+        self.norm_count = 0
+        
         # 训练步数
         self.steps_done = 0
         
@@ -99,15 +134,14 @@ class DQNAgent:
         self.loss_history = []
     
     def select_action(self, state, eval_mode=False):
-        """选择动作 (epsilon-greedy)"""
-        if eval_mode:
-            # 评估模式 - 纯贪心
-            with torch.no_grad():
-                state_tensor = torch.tensor(state, dtype=torch.float32, 
-                                           device=self.device).unsqueeze(0)
-                return self.policy_net(state_tensor).max(1).indices.view(1, 1).item()
+        """选择动作 (epsilon-greedy, 归一化后输入网络)"""
+        state = self._norm_batch([state])[0]
         
-        # 训练模式 - epsilon-greedy
+        if eval_mode:
+            with torch.no_grad():
+                st = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                return self.policy_net(st).max(1).indices.view(1, 1).item()
+        
         sample = random.random()
         eps_threshold = RL['epsilon_end'] + (RL['epsilon_start'] - RL['epsilon_end']) * \
                         math.exp(-1. * self.steps_done / RL['epsilon_decay'])
@@ -115,32 +149,35 @@ class DQNAgent:
         
         if sample > eps_threshold:
             with torch.no_grad():
-                state_tensor = torch.tensor(state, dtype=torch.float32, 
-                                           device=self.device).unsqueeze(0)
-                return self.policy_net(state_tensor).max(1).indices.view(1, 1).item()
+                st = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                return self.policy_net(st).max(1).indices.view(1, 1).item()
         else:
             return random.randrange(self.action_dim)
     
     def optimize_model(self):
-        """优化模型 - 单步优化"""
+        """优化模型 - 单步优化 (使用归一化状态)"""
         if len(self.memory) < RL['batch_size']:
             return 0
         
         transitions = self.memory.sample(RL['batch_size'])
         batch = Transition(*zip(*transitions))
         
+        # 归一化批数据
+        states_norm = self._norm_batch(batch.state)
+        next_states_norm = self._norm_batch(batch.next_state)
+        
         # 计算非终止状态的掩码
         non_final_mask = torch.tensor(
-            tuple(map(lambda s: s is not None, batch.next_state)),
+            tuple(map(lambda s: s is not None, next_states_norm)),
             device=self.device, dtype=torch.bool
         )
         non_final_next_states = torch.tensor(
-            [s for s in batch.next_state if s is not None],
+            [s for s in next_states_norm if s is not None],
             dtype=torch.float32, device=self.device
         )
         
         # 拼接批数据
-        state_batch = torch.tensor(batch.state, dtype=torch.float32, device=self.device)
+        state_batch = torch.tensor(states_norm, dtype=torch.float32, device=self.device)
         action_batch = torch.tensor(batch.action, dtype=torch.long, device=self.device).unsqueeze(1)
         reward_batch = torch.tensor(batch.reward, dtype=torch.float32, device=self.device)
         
@@ -178,26 +215,46 @@ class DQNAgent:
         self.target_net.load_state_dict(target_dict)
     
     def save(self, filepath):
-        """保存模型"""
+        """保存模型 (含归一化器状态)"""
         torch.save({
             'policy_net': self.policy_net.state_dict(),
             'target_net': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'steps_done': self.steps_done,
             'loss_history': self.loss_history,
+            'norm_mean': self.state_normalizer.mean,
+            'norm_var': self.state_normalizer.var,
+            'norm_count': self.state_normalizer.count,
         }, filepath)
         print(f"Model saved to {filepath}")
     
     def load(self, filepath):
-        """加载模型"""
+        """加载模型 (含归一化器状态)"""
         checkpoint = torch.load(filepath, map_location=self.device, weights_only=True)
         self.policy_net.load_state_dict(checkpoint['policy_net'])
         self.target_net.load_state_dict(checkpoint['target_net'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.steps_done = checkpoint.get('steps_done', 0)
         self.loss_history = checkpoint.get('loss_history', [])
+        if 'norm_mean' in checkpoint:
+            self.state_normalizer.mean = checkpoint['norm_mean']
+            self.state_normalizer.var = checkpoint['norm_var']
+            self.state_normalizer.count = checkpoint['norm_count']
         print(f"Model loaded from {filepath}")
     
     def store_transition(self, state, action, next_state, reward):
-        """存储经验"""
+        """存储经验 (存储原始状态, select_action时归一化)"""
         self.memory.push(state, action, next_state, reward)
+    
+    def _norm_batch(self, states_list):
+        """批量归一化状态列表"""
+        normed = []
+        for s in states_list:
+            if s is not None:
+                sn = np.array(s, dtype=np.float32)
+                if self.norm_count >= 100:
+                    sn = self.state_normalizer.normalize(sn)
+                normed.append(sn.tolist())
+            else:
+                normed.append(None)
+        return normed

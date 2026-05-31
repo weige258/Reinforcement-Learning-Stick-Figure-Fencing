@@ -26,6 +26,7 @@ class StickMan:
         self.blocking = False
         self.stun_timer = 0
         self.alive = True
+        self.damage_dealt_this_step = 0  # 本步造成的伤害 (用于奖励)
         
         # 存储所有身体部件
         self.bodies = {}      # 物理body
@@ -540,6 +541,10 @@ class StickMan:
             self.health = 0
             self.alive = False
     
+    def deal_damage(self, amount):
+        """记录本步造成的伤害"""
+        self.damage_dealt_this_step += amount
+    
     def get_center_x(self):
         """获取角色的X中心位置"""
         return self.bodies['torso'].position.x
@@ -553,6 +558,7 @@ class StickMan:
         return self.sword_body.velocity_at_world_point(tip).length
     
     def update(self, dt):
+        self.damage_dealt_this_step = 0  # 每帧重置伤害计数
         """每帧更新"""
         if self.attack_cooldown > 0:
             self.attack_cooldown -= dt
@@ -605,6 +611,7 @@ class StickMan:
         self.attack_cooldown = 0
         self.blocking = False
         self.stun_timer = 0
+        self.damage_dealt_this_step = 0
     
     def remove_from_space(self):
         """从物理空间移除"""

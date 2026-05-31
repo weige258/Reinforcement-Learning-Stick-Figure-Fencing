@@ -182,21 +182,23 @@ class MultiGameViewer:
         pygame.quit()
     
     def _save_models(self):
-        """只保存表现最好的智能体 (共2个文件)"""
-        # 选血量差最大的那局作为最佳模型
-        best_idx = 0
-        best_hp_diff = -999
-        for idx, g in enumerate(self.games):
-            diff = g.player1.health - g.player2.health
-            if diff > best_hp_diff:
-                best_hp_diff = diff
-                best_idx = idx
+        """基于滑动平均奖励保存最佳模型 (共2个文件)"""
+        # 收集所有agent的历史平均奖励
+        avg_rewards = []
+        for idx in range(self.num_games):
+            a1 = self.agents_p1[idx]
+            a2 = self.agents_p2[idx]
+            # 用loss_history长度作为局数的近似, 结合memory占用
+            mem_ratio = len(a1.memory) / RL['memory_size']
+            avg_rewards.append(mem_ratio)
+        
+        best_idx = int(np.argmax(avg_rewards))
         
         self.agents_p1[best_idx].save(
             os.path.join(self.model_dir, "agent_p1_best.pth"))
         self.agents_p2[best_idx].save(
             os.path.join(self.model_dir, "agent_p2_best.pth"))
-        print(f"💾 已保存最佳模型 (来自#{best_idx+1})")
+        print(f"💾 已保存最佳模型 (#{best_idx+1}, mem={avg_rewards[best_idx]:.0%})")
 
 
 def start_multi_training(grid_rows=2, grid_cols=2):

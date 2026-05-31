@@ -131,6 +131,7 @@ class FencingGame:
             impulse = hit_normal * knockback
             
             defender.take_damage(damage, impulse)
+            attacker.deal_damage(damage)  # 记录伤害用于奖励
             _set_cooldown(attacker, 0.3 if is_head else 0.2)
             return True
         
@@ -255,18 +256,24 @@ class FencingGame:
             stickman.move(action['move'])
     
     def _calculate_rewards(self, done):
-        """计算奖励 (含塑形奖励)"""
+        """计算奖励 (即时伤害+塑形+终局)"""
         r1 = 0.0
         r2 = 0.0
         
         p1, p2 = self.player1, self.player2
         
-        # 血量差奖励
-        health_diff = p1.health - p2.health
-        r1 += health_diff * 0.2
-        r2 += -health_diff * 0.2
+        # === 即时伤害奖励 (核心) ===
+        r1 += p1.damage_dealt_this_step * 0.5
+        r2 += p2.damage_dealt_this_step * 0.5
+        r1 -= p2.damage_dealt_this_step * 0.3  # 受击惩罚
+        r2 -= p1.damage_dealt_this_step * 0.3
         
-        # 位置奖励 - 鼓励面对面靠近
+        # === 血量差引导 ===
+        health_diff = p1.health - p2.health
+        r1 += health_diff * 0.1
+        r2 += -health_diff * 0.1
+        
+        # === 位置奖励 - 鼓励面对面靠近 ===
         dist = abs(p2.get_center_x() - p1.get_center_x())
         facing_right = p1.facing > 0
         p1_right_of_p2 = p1.get_center_x() > p2.get_center_x()
@@ -275,11 +282,15 @@ class FencingGame:
             r1 += proximity
             r2 += proximity
         
-        # 剑尖速度奖励 - 鼓励攻击
+        # === 剑速奖励 - 鼓励积极进攻 ===
         r1 += min(p1.get_sword_velocity() / 2000, 0.5)
         r2 += min(p2.get_sword_velocity() / 2000, 0.5)
         
-        # 击败/超时
+        # === 时间惩罚 - 防止挂机 ===
+        r1 -= 0.02
+        r2 -= 0.02
+        
+        # === 终局奖励 ===
         if done:
             if self.winner == p1:
                 r1 += 100; r2 -= 100
