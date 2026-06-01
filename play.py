@@ -74,6 +74,10 @@ class HumanVsAI:
                 # 执行一步(不强制翻转朝向, 角色固定初始朝向)
                 self.game.step(human_action, ai_action)
 
+                # 人机模式: 每帧瞄准鼠标方向(让手臂跟随鼠标)
+                if self.game.player1 and self.game.player1.is_alive():
+                    self.game.player1.aim_arm_at(*self.game.mouse_pos)
+
             # 渲染
             self.game.render_frame()
 

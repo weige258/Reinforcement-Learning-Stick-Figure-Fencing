@@ -30,8 +30,9 @@ class StickMan:
     def _add_box(self, name, mass, size, pos, angle=0, ct=1):
         body = pymunk.Body(mass, pymunk.moment_for_box(mass, size))
         body.position = pos; body.angle = angle
+        body.angular_damping = cfg.BODY_ANGULAR_DAMPING  # 旋转阻尼，防止倒地后疯狂旋转
         shape = pymunk.Poly.create_box(body, size)
-        shape.friction = 0.8; shape.elasticity = 0.1; shape.collision_type = ct
+        shape.friction = cfg.BODY_FRICTION; shape.elasticity = cfg.BODY_ELASTICITY; shape.collision_type = ct
         shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b1, mask=0b11111)
         self.space.add(body, shape)
         self.bodies[name] = body; self.shapes[name] = shape
@@ -40,6 +41,7 @@ class StickMan:
     def _add_circle(self, name, mass, radius, pos, ct=1):
         body = pymunk.Body(mass, pymunk.moment_for_circle(mass, 0, radius))
         body.position = pos
+        body.angular_damping = cfg.BODY_ANGULAR_DAMPING  # 旋转阻尼
         shape = pymunk.Circle(body, radius)
         shape.friction = 0.5; shape.elasticity = 0.2; shape.collision_type = ct
         shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b1, mask=0b11111)
@@ -63,6 +65,16 @@ class StickMan:
         self.space.add(j); self.joints.append(j)
         return j
 
+    def _stand_spring(self, body, stiffness, damping):
+        """站立弹簧: 将身体部位连接到世界坐标系，保持rest_angle=0（直立）
+        
+        关键区别: DampedRotarySpring 控制的是角度位置(P控制)，
+        而非 SimpleMotor 的角速度控制。这样才能主动推回直立角度。
+        """
+        j = pymunk.DampedRotarySpring(body, self.space.static_body, 0, stiffness, damping)
+        self.space.add(j); self.joints.append(j)
+        return j
+
     def _build_body(self, x, y):
         f = 1 if self.facing_right else -1
         tw, th = cfg.TORSO_WIDTH, cfg.TORSO_HEIGHT
@@ -73,9 +85,8 @@ class StickMan:
         # ==== 躯干 ====
         tp = Vec2d(x, y)
         self._add_box('torso', cfg.TORSO_MASS, (tw, th), tp)
-        # 躯干垂直稳定: SimpleMotor保持上身不倾倒
-        tm = pymunk.SimpleMotor(self.bodies['torso'], self.space.static_body, 0)
-        tm.max_force = 80000; self.space.add(tm); self.joints.append(tm)
+        # 躯干站立: DampedRotarySpring角度伺服(非SimpleMotor速度控制!)
+        self._stand_spring(self.bodies['torso'], cfg.STAND_TORSO_STIFFNESS, cfg.STAND_TORSO_DAMPING)
 
         # ==== 头(紧贴,双关节固定) ====
         hy = y - th/2 - hr
@@ -111,30 +122,29 @@ class StickMan:
         lhx = x - 7; lhy = y + th/2 + ull/2
         self._add_box('left_upper_leg', cfg.UPPER_LEG_MASS, (10, ull), (lhx, lhy))
         self._pivot(self.bodies['torso'], self.bodies['left_upper_leg'], (-6, th/2), (0, -ull/2))
-        self._spring(self.bodies['torso'], self.bodies['left_upper_leg'], 0, 8000, 800)
-        # 腿垂直稳定: SimpleMotor强制腿指向地面
-        m = pymunk.SimpleMotor(self.bodies['left_upper_leg'], self.space.static_body, 0)
-        m.max_force = 40000; self.space.add(m); self.joints.append(m)
+        # 大腿通过强弹簧跟随躯干(躯干直立时自然带动大腿回正)
+        self._spring(self.bodies['torso'], self.bodies['left_upper_leg'], 0, cfg.LEG_SPRING_STIFFNESS, cfg.LEG_SPRING_DAMPING)
 
         # ==== 左小腿 ====
         lkx = lhx; lky = lhy + ull/2 + lll/2
         self._add_box('left_lower_leg', cfg.LOWER_LEG_MASS, (8, lll), (lkx, lky))
         self._pivot(self.bodies['left_upper_leg'], self.bodies['left_lower_leg'], (0, ull/2), (0, -lll/2))
-        self._spring(self.bodies['left_upper_leg'], self.bodies['left_lower_leg'], 0, 6000, 600)
+        # 小腿通过强力弹簧跟随大腿(大腿站立时自然带动小腿回正)
+        self._spring(self.bodies['left_upper_leg'], self.bodies['left_lower_leg'], 0, cfg.CALF_SPRING_STIFFNESS, cfg.CALF_SPRING_DAMPING)
 
         # ==== 右大腿 ====
         rhx = x + 7; rhy = y + th/2 + ull/2
         self._add_box('right_upper_leg', cfg.UPPER_LEG_MASS, (10, ull), (rhx, rhy))
         self._pivot(self.bodies['torso'], self.bodies['right_upper_leg'], (6, th/2), (0, -ull/2))
-        self._spring(self.bodies['torso'], self.bodies['right_upper_leg'], 0, 8000, 800)
-        m = pymunk.SimpleMotor(self.bodies['right_upper_leg'], self.space.static_body, 0)
-        m.max_force = 40000; self.space.add(m); self.joints.append(m)
+        # 大腿通过强弹簧跟随躯干
+        self._spring(self.bodies['torso'], self.bodies['right_upper_leg'], 0, cfg.LEG_SPRING_STIFFNESS, cfg.LEG_SPRING_DAMPING)
 
         # ==== 右小腿 ====
         rkx = rhx; rky = rhy + ull/2 + lll/2
         self._add_box('right_lower_leg', cfg.LOWER_LEG_MASS, (8, lll), (rkx, rky))
         self._pivot(self.bodies['right_upper_leg'], self.bodies['right_lower_leg'], (0, ull/2), (0, -lll/2))
-        self._spring(self.bodies['right_upper_leg'], self.bodies['right_lower_leg'], 0, 6000, 600)
+        # 小腿通过强力弹簧跟随大腿(大腿站立时自然带动小腿回正)
+        self._spring(self.bodies['right_upper_leg'], self.bodies['right_lower_leg'], 0, cfg.CALF_SPRING_STIFFNESS, cfg.CALF_SPRING_DAMPING)
 
         # ==== 武器 ====
         self._create_sword(); self._attach_sword_to_hand()
@@ -144,6 +154,7 @@ class StickMan:
         hp = self._hand_pos('right')
         self.sword_body = pymunk.Body(cfg.SWORD_MASS, pymunk.moment_for_box(cfg.SWORD_MASS, (cfg.SWORD_LENGTH, cfg.SWORD_WIDTH)))
         self.sword_body.position = hp; self.sword_body.angle = math.radians(-90)
+        self.sword_body.angular_damping = cfg.WEAPON_ANGULAR_DAMPING
         self.sword_shape = pymunk.Poly.create_box(self.sword_body, (cfg.SWORD_LENGTH, cfg.SWORD_WIDTH))
         self.sword_shape.friction = 0.7; self.sword_shape.elasticity = 0.05
         self.sword_shape.collision_type = self.COLL_SWORD
@@ -163,6 +174,7 @@ class StickMan:
         hp = self._hand_pos('left')
         self.shield_body = pymunk.Body(cfg.SHIELD_MASS, pymunk.moment_for_box(cfg.SHIELD_MASS, (cfg.SHIELD_WIDTH, cfg.SHIELD_HEIGHT)))
         self.shield_body.position = hp
+        self.shield_body.angular_damping = cfg.WEAPON_ANGULAR_DAMPING
         self.shield_shape = pymunk.Poly.create_box(self.shield_body, (cfg.SHIELD_WIDTH, cfg.SHIELD_HEIGHT))
         self.shield_shape.friction = 0.8; self.shield_shape.elasticity = 0.1
         self.shield_shape.collision_type = self.COLL_SHIELD
@@ -191,26 +203,53 @@ class StickMan:
         if self.sword_body: return self.sword_body.local_to_world((cfg.SWORD_LENGTH/2, 0))
         return self.get_position()
 
+    def _is_on_ground(self):
+        """检查是否着地: 任意一只脚接近地面"""
+        for leg_name in ['left_lower_leg', 'right_lower_leg']:
+            if leg_name in self.bodies:
+                foot_y = self.bodies[leg_name].position.y
+                foot_bottom = foot_y + cfg.LOWER_LEG_LENGTH / 2
+                if foot_bottom >= cfg.GROUND_Y - 15:
+                    return True
+        # 回退: 躯干不能太高(防止空中二段跳)
+        return self.get_position().y > cfg.GROUND_Y - 130
+
     def apply_movement(self, move_x=0, move_y=0, jump=False, attack=False, block=False):
         torso = self.bodies['torso']
         force = 10000.0
 
         # 限速
-        v = torso.velocity; mx, my = 400, 500
+        v = torso.velocity; mx, my = 400, 800
         if abs(v.x) > mx: torso.velocity = Vec2d(math.copysign(mx, v.x), v.y)
         if abs(v.y) > my: torso.velocity = Vec2d(v.x, math.copysign(my, v.y))
-        # 辅助扶正(SimpleMotor控角速度, 扭矩控角度)
+        # 辅助扶正：倒地时用强力扭矩翻身，直立时用柔和扭矩
         a = torso.angle
-        if abs(a) > 0.1: torso.torque += -a * 50000.0
+        if abs(a) > cfg.STAND_TILT_THRESHOLD:  # 躯干倾斜超过阈值 = 倒地状态
+            torso.torque += -a * cfg.FALL_RECOVERY_TORQUE  # 强力翻身扭矩
+        elif abs(a) > 0.05:
+            torso.torque += -a * cfg.STAND_CORRECT_TORQUE   # 轻微扶正
 
         if move_x != 0:
-            torso.apply_force_at_local_point((move_x*force, 0), (0, 0))
+            # 世界坐标系施加力，方向不受躯干旋转影响
+            fd = 1 if self.facing_right else -1
+            world_force = (move_x * fd * force, 0)
+            torso.apply_force_at_world_point(world_force, torso.position)
             for leg in ['left_upper_leg', 'right_upper_leg']:
-                self.bodies[leg].apply_force_at_local_point((move_x*force*0.2, 0), (0, 0))
+                self.bodies[leg].apply_force_at_world_point(
+                    (move_x * fd * force * 0.2, 0), self.bodies[leg].position)
+            # 倒地时额外给躯干扭矩辅助翻身
+            if abs(torso.angle) > cfg.STAND_TILT_THRESHOLD:
+                torso.torque += -move_x * fd * 200000.0
 
-        # 跳跃: 仅当躯干在地面附近时才能跳
-        if jump and torso.position.y > cfg.GROUND_Y - 80:
-            torso.apply_impulse_at_local_point((0, -25000), (0, 0))
+        # 跳跃: 着地时直接设置向上速度(比impulse更可控)
+        if jump and self._is_on_ground():
+            torso.velocity = Vec2d(torso.velocity.x, cfg.JUMP_VELOCITY)
+            # 也给大腿一个向上的初速度，让整个身体一起跳
+            for leg in ['left_upper_leg', 'right_upper_leg']:
+                if leg in self.bodies:
+                    self.bodies[leg].velocity = Vec2d(
+                        self.bodies[leg].velocity.x,
+                        min(self.bodies[leg].velocity.y, cfg.JUMP_VELOCITY * 0.6))
 
         if attack and self.attack_cooldown_timer <= 0:
             self._perform_attack()
@@ -221,12 +260,25 @@ class StickMan:
 
     def _perform_attack(self):
         self.is_attacking = True; self.attack_cooldown_timer = cfg.ATTACK_COOLDOWN
-        d = 1 if self.facing_right else -1
-        self.sword_body.angular_velocity += d*35.0
-        self.sword_body.torque = d*cfg.ATTACK_TORQUE*0.5
-        self.sword_body.apply_impulse_at_world_point(Vec2d(d*300, -150), self.get_sword_tip_position())
-        self.bodies['right_upper_arm'].angular_velocity += d*10.0
-        self.bodies['right_upper_arm'].torque += d*50000
+        # 根据剑当前指向计算攻击方向(跟随鼠标)
+        if self.sword_body:
+            sword_angle = self.sword_body.angle
+            dx = math.cos(sword_angle); dy = math.sin(sword_angle)
+            self.sword_body.angular_velocity += dx * 35.0
+            self.sword_body.torque = dx * cfg.ATTACK_TORQUE * 0.5
+            self.sword_body.apply_impulse_at_world_point(
+                Vec2d(dx * 300, dy * 150), self.get_sword_tip_position())
+            # 手臂也朝剑的方向挥动
+            self.bodies['right_upper_arm'].angular_velocity += dx * 10.0
+            self.bodies['right_upper_arm'].torque += dx * 80000
+        else:
+            d = 1 if self.facing_right else -1
+            self.sword_body.angular_velocity += d * 35.0
+            self.sword_body.torque = d * cfg.ATTACK_TORQUE * 0.5
+            self.sword_body.apply_impulse_at_world_point(
+                Vec2d(d * 300, -150), self.get_sword_tip_position())
+            self.bodies['right_upper_arm'].angular_velocity += d * 10.0
+            self.bodies['right_upper_arm'].torque += d * 80000
 
     def _perform_block(self):
         self.is_blocking = True
@@ -235,11 +287,25 @@ class StickMan:
             self.shield_body.apply_force_at_world_point(Vec2d(d*4000, -1000), self.shield_body.position)
 
     def aim_arm_at(self, tx, ty):
+        """手臂指向目标点(鼠标), 连续调用保持跟随
+        注意: 仅控制手臂指向, 剑身仅在攻击时挥动
+        """
         shoulder = self.bodies['right_upper_arm'].position
-        angle = math.atan2(ty-shoulder.y, tx-shoulder.x)
+        angle = math.atan2(ty - shoulder.y, tx - shoulder.x)
         diff = angle - self.bodies['right_upper_arm'].angle
+        while diff > math.pi: diff -= 2*math.pi
+        while diff < -math.pi: diff += 2*math.pi
         diff = max(min(diff, 0.5), -1.0)
-        self.bodies['right_upper_arm'].torque = diff * 40000
+        self.bodies['right_upper_arm'].torque = diff * 200000
+        # 手腕跟随: 让前臂也参与瞄准
+        if 'right_lower_arm' in self.bodies:
+            elbow = self.bodies['right_lower_arm'].position
+            elbow_angle = math.atan2(ty - elbow.y, tx - elbow.x)
+            ediff = elbow_angle - self.bodies['right_lower_arm'].angle
+            while ediff > math.pi: ediff -= 2*math.pi
+            while ediff < -math.pi: ediff += 2*math.pi
+            ediff = max(min(ediff, 0.5), -1.0)
+            self.bodies['right_lower_arm'].torque = ediff * 120000
 
     def take_damage(self, damage, hit_point=None):
         if self.is_blocking: damage *= (1-cfg.SHIELD_BLOCK_DAMAGE_REDUCTION)
@@ -260,25 +326,38 @@ class StickMan:
         return Vec2d(0, 0)
 
     def get_state_vector(self, enemy_pos):
+        """镜像归一化状态: 全部相对于自身朝向和位置"""
         p = self.get_position(); h = self.get_head_position()
-        er = enemy_pos - p; d = min(er.get_distance((0,0))/500.0, 1.0)
+        fs = 1 if self.facing_right else -1
+
+        rel_x = (enemy_pos.x - p.x) * fs / cfg.WINDOW_WIDTH
+        rel_y = (enemy_pos.y - p.y) / cfg.WINDOW_HEIGHT
+        dist = min(abs(enemy_pos.x - p.x) / 500.0, 1.0)
+        mx = self.bodies['torso'].velocity.x * fs / 300.0
+        my = self.bodies['torso'].velocity.y / 300.0
+
         return [
-            p.x/cfg.WINDOW_WIDTH, p.y/cfg.WINDOW_HEIGHT,
-            self.bodies['torso'].velocity.x/300, self.bodies['torso'].velocity.y/300,
-            er.x/cfg.WINDOW_WIDTH, er.y/cfg.WINDOW_HEIGHT, d,
-            self.health/self.max_health,
-            enemy_pos.x/cfg.WINDOW_WIDTH, enemy_pos.y/cfg.WINDOW_HEIGHT,
-            self.sword_body.angle%(2*math.pi)/(2*math.pi) if self.sword_body else 0,
-            self.sword_body.angular_velocity/15 if self.sword_body else 0,
-            h.x/cfg.WINDOW_WIDTH, h.y/cfg.WINDOW_HEIGHT,
-            self.bodies['head'].velocity.x/200, self.bodies['head'].velocity.y/200,
-            1.0 if self.is_attacking else 0, 1.0 if self.is_blocking else 0,
-            self.bodies['torso'].angle/math.pi,
-            self.bodies['right_upper_arm'].angle/math.pi,
-            self.bodies['left_upper_arm'].angle/math.pi,
-            self.shield_body.angle/math.pi if self.shield_body else 0,
-            self.sword_body.velocity.x/300 if self.sword_body else 0,
-            self.sword_body.velocity.y/300 if self.sword_body else 0,
+            rel_x, rel_y, dist,
+            mx, my,
+            self.health / self.max_health,
+            1.0 if self.is_attacking else 0,
+            1.0 if self.is_blocking else 0,
+            self.bodies['torso'].angle / math.pi,
+            self.bodies['right_upper_arm'].angle / math.pi,
+            self.bodies['left_upper_arm'].angle / math.pi,
+            self.sword_body.angle % (2*math.pi) / (2*math.pi) if self.sword_body else 0,
+            self.sword_body.angular_velocity / 15.0 if self.sword_body else 0,
+            (self.sword_body.velocity.x * fs) / 300.0 if self.sword_body else 0,
+            self.sword_body.velocity.y / 300.0 if self.sword_body else 0,
+            h.x * fs / cfg.WINDOW_WIDTH,
+            h.y / cfg.WINDOW_HEIGHT,
+            float(self.attack_cooldown_timer),
+            self.shield_body.angle / math.pi if self.shield_body else 0,
+            p.y / cfg.WINDOW_HEIGHT,
+            self.bodies['head'].velocity.x * fs / 200.0 if self.bodies.get('head') else 0,
+            enemy_pos.x / cfg.WINDOW_WIDTH,
+            enemy_pos.y / cfg.WINDOW_HEIGHT,
+            float(fs),
         ]
 
     def remove(self):

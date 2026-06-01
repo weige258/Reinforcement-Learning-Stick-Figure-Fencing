@@ -1,7 +1,8 @@
 """
 DQN (Deep Q-Network) 智能体 - 使用PyTorch实现
-参考: "Creating Pro-Level AI for a Real-Time Fighting Game Using Deep Reinforcement Learning" (2019)
-      "Diversity-based Deep Reinforcement Learning for Fighting Game AI" (2022)
+Dueling DQN + Residual Blocks + LayerNorm, ~8M参数
+参考: "Dueling Network Architectures for Deep Reinforcement Learning" (Wang et al., 2016)
+      "Deep Residual Learning for Image Recognition" (He et al., 2015)
 """
 import random
 import math
@@ -15,33 +16,104 @@ import numpy as np
 import game_config as cfg
 
 
-class DQN(nn.Module):
-    """深度Q网络 - 用于格斗游戏的决策网络"""
+class ResidualBlock(nn.Module):
+    """残差块: x + ReLU(LN(Linear(ReLU(LN(Linear(x))))))
+
+    参考 Deep Residual Learning, 解决深层网络梯度消失问题
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+        )
+        self.act = nn.ReLU()
+
+    def forward(self, x):
+        return self.act(x + self.net(x))
+
+
+class DuelingDQN(nn.Module):
+    """Dueling DQN: 分离状态价值V(s)和动作优势A(s,a)
+
+    Q(s,a) = V(s) + (A(s,a) - mean(A(s,:)))
+
+    架构 (≈7.9M参数):
+      输入(24) → 特征提取(1024) → 3×ResBlock(1024)
+                ├→ 价值流(512→512→1)
+                └→ 优势流(512→512→9)
+    """
 
     def __init__(self, state_dim=cfg.STATE_DIM, action_dim=cfg.ACTION_DIM):
-        super(DQN, self).__init__()
+        super().__init__()
 
-        self.net = nn.Sequential(
+        # 特征提取层
+        self.feature = nn.Sequential(
             nn.Linear(state_dim, cfg.HIDDEN_DIM_1),
+            nn.LayerNorm(cfg.HIDDEN_DIM_1),
             nn.ReLU(),
-            nn.Linear(cfg.HIDDEN_DIM_1, cfg.HIDDEN_DIM_2),
-            nn.ReLU(),
-            nn.Linear(cfg.HIDDEN_DIM_2, action_dim)
         )
 
-        # 初始化权重
+        # 残差块 - 核心特征处理
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(cfg.HIDDEN_DIM_2)
+            for _ in range(cfg.NUM_RES_BLOCKS)
+        ])
+
+        # 价值流 V(s): 评估当前状态的长期价值
+        self.value_stream = nn.Sequential(
+            nn.Linear(cfg.HIDDEN_DIM_2, cfg.VALUE_DIM),
+            nn.LayerNorm(cfg.VALUE_DIM),
+            nn.ReLU(),
+            nn.Linear(cfg.VALUE_DIM, cfg.VALUE_DIM),
+            nn.LayerNorm(cfg.VALUE_DIM),
+            nn.ReLU(),
+            nn.Linear(cfg.VALUE_DIM, 1),
+        )
+
+        # 优势流 A(s,a): 评估每个动作相对于平均的优势
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(cfg.HIDDEN_DIM_2, cfg.ADVANTAGE_DIM),
+            nn.LayerNorm(cfg.ADVANTAGE_DIM),
+            nn.ReLU(),
+            nn.Linear(cfg.ADVANTAGE_DIM, cfg.ADVANTAGE_DIM),
+            nn.LayerNorm(cfg.ADVANTAGE_DIM),
+            nn.ReLU(),
+            nn.Linear(cfg.ADVANTAGE_DIM, action_dim),
+        )
+
         self._init_weights()
 
     def _init_weights(self):
-        """初始化网络权重（使用Kaiming初始化）"""
-        for module in self.net:
+        """Kaiming初始化 + 最后一层小权重(促进初始探索)"""
+        for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(module.bias, 0)
+                if 'advantage_stream' in name and name.endswith('.weight'):
+                    # 最后一层优势流小权重, 让初始Q值接近0
+                    if 'advantage_stream.6' in name:
+                        nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                        module.weight.data *= 0.1
+                    else:
+                        nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                elif 'value_stream' in name and name.endswith('.weight'):
+                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                else:
+                    nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
     def forward(self, x):
-        """前向传播"""
-        return self.net(x)
+        features = self.feature(x)
+        for block in self.res_blocks:
+            features = block(features)
+        value = self.value_stream(features)
+        advantage = self.advantage_stream(features)
+        # Dueling组合: Q = V + (A - mean(A))
+        return value + advantage - advantage.mean(dim=1, keepdim=True)
 
 
 class ReplayMemory:
@@ -82,8 +154,8 @@ class DQNAgent:
         self.action_dim = action_dim
 
         # 主网络和目标网络
-        self.policy_net = DQN(state_dim, action_dim).to(self.device)
-        self.target_net = DQN(state_dim, action_dim).to(self.device)
+        self.policy_net = DuelingDQN(state_dim, action_dim).to(self.device)
+        self.target_net = DuelingDQN(state_dim, action_dim).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 

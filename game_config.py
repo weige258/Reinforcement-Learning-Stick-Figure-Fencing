@@ -16,6 +16,24 @@ GROUND_Y = 620
 GROUND_THICKNESS = 30
 DAMPING = 0.99  # 空间阻尼
 
+# ============ 物理稳定参数 ============
+BODY_ANGULAR_DAMPING = 0.5     # 身体刚体旋转阻尼(防止倒地疯狂旋转)
+WEAPON_ANGULAR_DAMPING = 0.3   # 武器/盾牌旋转阻尼
+BODY_FRICTION = 0.4            # 身体碰撞摩擦(降低减少卡住)
+BODY_ELASTICITY = 0.3          # 身体碰撞弹性(增加反弹分离)
+# 站立弹簧: DampedRotarySpring连接到static_body (仅躯干! 腿部通过链式弹簧跟随)
+STAND_TORSO_STIFFNESS = 5000000   # 躯干站立弹簧硬度(唯一的世界连接)
+STAND_TORSO_DAMPING = 200000      # 躯干站立弹簧阻尼
+# 腿-躯干弹簧(腿部站立的唯一力量来源)
+LEG_SPRING_STIFFNESS = 800000     # 大腿-躯干回正弹簧硬度
+LEG_SPRING_DAMPING = 120000       # 大腿-躯干回正弹簧阻尼
+# 小腿-大腿弹簧
+CALF_SPRING_STIFFNESS = 500000    # 小腿-大腿回正弹簧硬度
+CALF_SPRING_DAMPING = 80000       # 小腿-大腿回正弹簧阻尼
+STAND_TILT_THRESHOLD = 0.8        # 躯干倾斜阈值(rad), 超过此值视为倒地
+FALL_RECOVERY_TORQUE = 500000     # 倒地翻身扭矩
+STAND_CORRECT_TORQUE = 100000     # 站立扶正扭矩
+
 # ============ 火柴人身体参数(双段四肢) ============
 HEAD_RADIUS = 14
 TORSO_WIDTH = 28
@@ -59,6 +77,9 @@ ATTACK_SPEED_THRESHOLD = 30.0   # 降低阈值，使攻击更容易命中
 ATTACK_TORQUE = 200000.0         # 攻击旋转力矩
 ATTACK_IMPULSE = 500.0           # 攻击脉冲力
 
+# 跳跃参数
+JUMP_VELOCITY = -850             # 跳跃初速度(负=向上), 约180px高度
+
 # ============ 颜色配置 ============
 PLAYER1_COLOR = (100, 180, 255)  # 蓝色系
 PLAYER2_COLOR = (255, 100, 100)  # 红色系
@@ -68,7 +89,7 @@ HEAD_COLOR = (255, 220, 180)
 BLOOD_COLOR = (180, 30, 30)
 
 # ============ RL训练参数 ============
-STATE_DIM = 24  # 状态空间维度
+STATE_DIM = 24  # 状态空间维度(镜像归一化: 相对坐标+朝向+冷却)
 ACTION_DIM = 9  # 动作空间维度
 
 # 动作映射: [move_x, move_y, jump, attack, block]
@@ -97,9 +118,13 @@ MEMORY_SIZE = 100000
 TARGET_UPDATE_INTERVAL = 100
 TRAIN_INTERVAL = 4
 
-# 网络结构
-HIDDEN_DIM_1 = 256
-HIDDEN_DIM_2 = 256
+# 网络结构 (Dueling DQN + Residual Blocks, ~8M参数)
+# 架构: 24→1024→[3×ResBlock(1024)]→Value(512→1)+Advantage(512→9)
+HIDDEN_DIM_1 = 1024  # 特征提取层
+HIDDEN_DIM_2 = 1024  # 残差块维度
+NUM_RES_BLOCKS = 3    # 残差块数量
+VALUE_DIM = 512       # 价值流隐藏层
+ADVANTAGE_DIM = 512   # 优势流隐藏层
 
 # 奖励设计
 # 奖励设计(统一缩放到[-1,1]区间)

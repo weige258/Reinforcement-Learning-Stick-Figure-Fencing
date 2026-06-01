@@ -1,21 +1,24 @@
 ﻿"""
 主菜单界面 - 支持鼠标和键盘
 """
+import os
+import sys
 import pygame
 import game_config as cfg
 
 CHINESE_FONTS = [
-    "C:/Windows/Fonts/msyh.ttc",
+    "SourceHanSansSC-Regular.otf",     # 项目自带字体(优先)
+    "C:/Windows/Fonts/msyh.ttc",       # Windows
     "C:/Windows/Fonts/simhei.ttf",
-    "C:/Windows/Fonts/simsun.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",  # Linux
+    "/System/Library/Fonts/PingFang.ttc",            # macOS
 ]
 
 def _get_font(size):
     for p in CHINESE_FONTS:
-        try:
-            return pygame.font.Font(p, size)
-        except:
-            continue
+        if os.path.exists(p):
+            try: return pygame.font.Font(p, size)
+            except: continue
     return pygame.font.Font(None, size)
 
 

@@ -58,27 +58,31 @@ def print_help():
 
 
 def run_mode(mode, model='models/agent_p1_final.pth', model_p2=None, episodes=500, render=True):
-    """运行指定模式"""
+    """运行指定模式，返回是否继续"""
     if mode == 'play':
         from play import HumanVsAI
         game = HumanVsAI(model_path=model)
         game.run()
+        return True  # 返回后继续菜单
     elif mode == 'train':
-        from train import Trainer, MultiTrainer
-        # 从菜单中选择训练 = 9宫格模式, 命令行 --mode train 可选渲染
-        trainer = MultiTrainer(total_episodes=episodes) if render else Trainer(render=render, total_episodes=episodes)
+        from train import Trainer, MultiTrainer9
+        if render:
+            trainer = MultiTrainer9(total_episodes=episodes)
+        else:
+            trainer = Trainer(render=False, total_episodes=episodes)
         trainer.train()
+        return True
     elif mode == 'ai_vs_ai':
         from play import AIVsAI
         game = AIVsAI(model_path_p1=model, model_path_p2=model_p2)
         game.run()
+        return True
     elif mode == 'exit':
-        print("感谢游玩!")
-        sys.exit(0)
+        return False
 
 
 def main():
-    """主入口 - 先显示菜单，再进入对应模式"""
+    """主入口 - 菜单循环"""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -95,7 +99,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 如果命令行指定了模式，直接运行
+    # 如果命令行指定了模式，直接运行后退出
     if args.mode:
         print_banner()
         mode = args.mode
@@ -105,25 +109,32 @@ def main():
         run_mode(mode, args.model, args.model_p2, args.episodes, not args.no_render)
         return
 
-    # 否则显示菜单
     import pygame
-    pygame.init()
-    screen = pygame.display.set_mode((cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT))
-    pygame.display.set_caption('⚔ 火柴人击剑格斗')
 
-    from menu import Menu
-    menu = Menu(screen)
-    mode = menu.run()
+    # 主菜单循环: 每次模式结束后返回菜单
+    while True:
+        pygame.init()
+        screen = pygame.display.set_mode((cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT))
+        pygame.display.set_caption('火柴人击剑格斗')
 
-    if mode == 'exit':
-        pygame.quit()
-        sys.exit(0)
+        from menu import Menu
+        menu = Menu(screen)
+        mode = menu.run()
 
-    # 运行选择的模式
-    if mode == 'train':
-        run_mode('train', episodes=args.episodes, render=True)
-    else:
-        run_mode(mode)
+        if mode == 'exit':
+            break
+
+        # 运行选择的模式
+        if mode == 'train':
+            run_mode('train', episodes=args.episodes, render=True)
+        else:
+            run_mode(mode)
+
+        pygame.display.quit()
+
+    pygame.quit()
+    print("感谢游玩!")
+    sys.exit(0)
 
 
 if __name__ == '__main__':
