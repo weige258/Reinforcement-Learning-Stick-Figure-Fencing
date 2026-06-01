@@ -2,6 +2,7 @@
 训练脚本 - 自我对抗训练DQN智能体
 使用自对弈课程学习（参考Pro-Level Fighting Game AI论文方法）
 """
+import random as _rnd
 import time
 import os
 import sys
@@ -11,6 +12,7 @@ import signal
 import numpy as np
 import pygame
 import torch
+from pymunk import Vec2d
 
 import game_config as cfg
 from fencing_game import FencingGame
@@ -252,12 +254,13 @@ class MultiTrainer9:
 
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # 3×3 = 9个并行环境
+        # 3×3 = 9个并行环境, 各环境中两个玩家独立随机位置
         self.grid_size = 3
         self.num_envs = 9
         self.envs = [FencingGame(render=False) for _ in range(self.num_envs)]
         for env in self.envs:
             env.create_players()
+        self._randomize_all_positions()  # 玩家各自独立随机
 
         # 共享DQN智能体(CUDA加速)
         self.agent = DQNAgent.load_or_create(self.model_path, player_id=1, device=self.device)
@@ -268,32 +271,48 @@ class MultiTrainer9:
         self._sync_counter = 0
         self._sync_opponent()
 
-        total_params = sum(p.numel() for p in self.agent.policy_net.parameters())
-        print(f"\n{'='*60}")
-        print(f"  9环境并行训练器 v2")
-        print(f"{'='*60}")
-        print(f"  模型: {total_params:,} 参数 | 设备: {self.device.upper()}")
-        print(f"  环境: 3x3 = {self.num_envs} 并行")
-        print(f"  批量推理: [OK] (9合1张量)")
-        print(f"  真自对弈: [OK] (每50回合同步)")
-        print(f"  经验共享: [OK] (9x经验率)")
-        print(f"{'='*60}\n")
+        # 重置全部环境时同时随机化位置
+        self._reset_all = self._reset_all_and_randomize
 
+        # 训练状态
         self.best_reward = float('-inf')
         self._interrupted = False
         self._sync_counter = 0
         self._screen = None
         self._font = None
 
+    def _randomize_all_positions(self):
+        """随机化全部环境的玩家初始位置(玩家各自独立)"""
+        for idx, env in enumerate(self.envs):
+            if not env.player1 or not env.player2:
+                continue
+            # player1 在左侧随机: 100~350
+            p1x = _rnd.randint(80, 350)
+            p1y = _rnd.randint(cfg.GROUND_Y - 120, cfg.GROUND_Y - 60)
+            env.player1.bodies['torso'].position = Vec2d(p1x, p1y)
+            # player2 在右侧随机: 850~1100
+            p2x = _rnd.randint(850, 1120)
+            p2y = _rnd.randint(cfg.GROUND_Y - 120, cfg.GROUND_Y - 60)
+            env.player2.bodies['torso'].position = Vec2d(p2x, p2y)
+
+    def _reset_all_and_randomize(self):
+        """重置全部环境 + 随机化位置"""
+        for env in self.envs:
+            env.reset()
+        self._randomize_all_positions()
+
     def _init_display(self):
-        pygame.init()
+        """初始化训练窗口(从菜单切换过来, 直接resize窗口)"""
         w = min(cfg.WINDOW_WIDTH, 900)
         h = min(cfg.WINDOW_HEIGHT, 700)
         self._screen = pygame.display.set_mode((w, h))
-        pygame.display.set_caption(f"3×3并行训练 - {self.device.upper()} - {self.num_envs}env")
+        pygame.display.set_caption(f"3x3并行训练 - {self.device.upper()} - {self.num_envs}env")
         self._font = pygame.font.Font(None, 13)
         self._cell_w = w // 3
         self._cell_h = h // 3
+        # 立即显示一帧, 避免黑屏
+        self._screen.fill((15, 15, 25))
+        pygame.display.flip()
 
     def _signal_handler(self, sig, frame):
         self._interrupted = True
@@ -319,9 +338,8 @@ class MultiTrainer9:
                 if ep % 50 == 0:
                     self._sync_opponent()
 
-                # 重置全部环境
-                for env in self.envs:
-                    env.reset()
+                # 重置全部环境(含随机化位置)
+                self._reset_all()
 
                 total_reward = 0
                 step = 0
@@ -511,8 +529,9 @@ class MultiTrainer9:
                     sw = cfg.SHIELD_WIDTH * sx; sh = cfg.SHIELD_HEIGHT * sy
                     sr = pygame.Rect(shx - sw / 2, shy - sh / 2, sw, sh)
                     pygame.draw.rect(self._screen, cfg.SHIELD_COLOR, sr, 0, max(1, int(1 * sx)))
-            except Exception:
-                pass
+            except Exception as e:
+                if str(e):  # 只打印一次, 不刷屏
+                    pass
 
         _ds(env.player1, cfg.PLAYER1_COLOR)
         _ds(env.player2, cfg.PLAYER2_COLOR)
