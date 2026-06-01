@@ -1,21 +1,14 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg
+*.py[cod]
+*.so
 *.egg-info/
 dist/
 build/
-
-# 虚拟环境
+*.egg
 .venv/
 venv/
 env/
-
-# 模型文件 (训练生成, 体积大)
-models/
-*.pth
 
 # IDE
 .vscode/
@@ -23,6 +16,15 @@ models/
 *.swp
 *.swo
 
-# 系统
-Thumbs.db
+# Models (trained AI weighing ~10MB each, too large for git)
+models/*.pth
+
+# Pygame/OS
+*.log
 .DS_Store
+Thumbs.db
+
+# Test/temp files
+debug_test*.py
+_fix_*.py
+test_*.py

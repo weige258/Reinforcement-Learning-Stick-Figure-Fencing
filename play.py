@@ -1,169 +1,166 @@
 """
-人机对战模式 - 人类玩家 VS AI智能体
+人机对战模式 / AI vs AI 观看模式
+玩家使用 WASD 移动，鼠标左键挥剑，鼠标右键举盾
 """
+import os
 import sys
 import pygame
-import torch
 
-from game_config import *
+import game_config as cfg
 from fencing_game import FencingGame
 from dqn_agent import DQNAgent
 
 
-def human_vs_ai(model_path=None):
-    """人类玩家 VS AI - WASD移动 + 鼠标拖拽挥剑"""
-    print("=" * 60)
-    print(" 火柴人击剑格斗 - 人机对战")
-    print(" 🖱️ 鼠标左键拖拽 = 挥剑 (方向+速度决定攻击)")
-    print(" ⌨️  WASD = 移动  |  W = 跳跃")
-    print("    Space = 重置  |  ESC = 退出")
-    print("=" * 60)
-    
-    game = FencingGame(render=True)
-    agent = DQNAgent(RL['state_dim'], RL['action_dim'])
-    
-    if model_path:
-        agent.load(model_path)
-    else:
-        import os
-        default_path = os.path.join(os.path.dirname(__file__), 'models', 'agent_p2_final.pth')
-        if os.path.exists(default_path):
-            agent.load(default_path)
-            print(f"已加载模型: {default_path}")
-        else:
-            print("未找到模型，AI将使用随机动作")
-    
-    agent.policy_net.eval()
-    
-    running = True
-    state = game.reset()
-    clock = pygame.time.Clock()
-    
-    try:
-        while running:
+class HumanVsAI:
+    """人机对战模式"""
+
+    def __init__(self, model_path=None, device='cpu'):
+        self.game = FencingGame(render=True)
+
+        # 创建AI智能体（玩家2为AI）- 自动加载或创建
+        self.ai_agent = DQNAgent.load_or_create(
+            model_path or 'models/agent_p1_final.pth',
+            player_id=2, device=device
+        )
+        self.ai_agent.training = False
+
+        # 游戏状态
+        self.running = True
+        self.paused = False
+        self.frame_count = 0  # AI决策帧计数器
+        self.game.create_players()
+
+    def run(self):
+        """运行主循环"""
+        print(f"\n{'='*50}")
+        print("  火柴人击剑格斗 - 人机对战")
+        print(f"{'='*50}")
+        print("  操作说明:")
+        print("  - WASD: 移动")
+        print("  - 鼠标左键: 挥剑")
+        print("  - 鼠标右键: 举盾")
+        print("  - 鼠标移动: 瞄准")
+        print("  - R: 重新开始")
+        print("  - ESC: 退出")
+        print(f"{'='*50}\n")
+
+        while self.running:
             # 处理事件
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_SPACE:
-                        state = game.reset()
-                        print("游戏重置!")
-                    elif event.key == pygame.K_ESCAPE:
-                        running = False
-            
-            # AI选择动作
-            ai_action = agent.select_action(state, eval_mode=True)
-            
-            # 执行人机对战一步 (内部处理鼠标+WASD输入)
-            next_state, reward, done, info = game.human_step(ai_action)
-            
-            # 渲染
-            cont = game.render_frame()
-            if not cont:
-                running = False
-            
-            state = next_state
-            clock.tick(FPS)
-            
-            if done:
-                if info['winner'] == game.player1:
-                    print(f"🎉 你赢了! 剩余血量: {info['health1']:.0f}")
-                elif info['winner'] == game.player2:
-                    print(f"💀 AI 赢了! 你的血量: {info['health1']:.0f}")
-                else:
-                    print(f"⚖️ 平局! P1: {info['health1']:.0f} vs P2: {info['health2']:.0f}")
-                
-                pygame.time.wait(1000)
-                state = game.reset()
-    
-    finally:
-        game.close()
-
-
-def ai_vs_ai(model1_path=None, model2_path=None):
-    """AI VS AI (观看两个智能体对战)"""
-    print("观看 AI VS AI 对战...")
-    
-    game = FencingGame(render=True)
-    agent1 = DQNAgent(RL['state_dim'], RL['action_dim'])
-    agent2 = DQNAgent(RL['state_dim'], RL['action_dim'])
-    
-    if model1_path:
-        agent1.load(model1_path)
-    if model2_path:
-        agent2.load(model2_path)
-    
-    agent1.policy_net.eval()
-    agent2.policy_net.eval()
-    
-    p1_wins = 0
-    p2_wins = 0
-    draws = 0
-    
-    for episode in range(10):
-        state = game.reset()
-        total_steps = 0
-        
-        while total_steps < RL['max_steps_per_episode']:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    game.close()
+            events = self.game.handle_events()
+            for event in events:
+                if event == 'quit':
+                    self.running = False
                     return
-            
-            action1 = agent1.select_action(state, eval_mode=True)
-            action2 = agent2.select_action(state, eval_mode=True)
-            
-            next_state, r1, r2, done, info = game.step(action1, action2)
-            
-            cont = game.render_frame()
-            if not cont:
-                game.close()
-                return
-            
-            state = next_state
-            total_steps += 1
-            pygame.time.wait(16)  # ~60fps
-            
-            if done:
-                break
-        
-        if info['winner'] == game.player1:
-            p1_wins += 1
-            result = "P1 胜"
-        elif info['winner'] == game.player2:
-            p2_wins += 1
-            result = "P2 胜"
-        else:
-            draws += 1
-            result = "平局"
-        
-        print(f"局 {episode+1}: {result} | P1血量={info['health1']:.0f} P2血量={info['health2']:.0f}")
-        pygame.time.wait(500)
-    
-    print(f"\n总计: P1胜 {p1_wins}, P2胜 {p2_wins}, 平局 {draws}")
-    game.close()
+                elif event == 'reset':
+                    self.game.reset()  # reset内部已调用create_players
+
+            if self.paused:
+                continue
+
+            if not self.game.game_over:
+                # 获取人类玩家输入
+                human_action = self.game.get_human_input(player_id=1)
+
+                # AI每3帧决策一次(60/3=20次/秒)
+                if self.frame_count % 3 == 0:
+                    state = self.game.get_state_for_agent(2)
+                    if state is not None:
+                        self._ai_action_idx = self.ai_agent.select_action(state, eval_mode=True)
+                    else:
+                        self._ai_action_idx = 0
+                ai_action = self.ai_agent.get_action_tuple(self._ai_action_idx)
+                self.frame_count += 1
+
+                # 执行一步(不强制翻转朝向, 角色固定初始朝向)
+                self.game.step(human_action, ai_action)
+
+            # 渲染
+            self.game.render_frame()
+
+        self.game.close()
+
+
+class AIVsAI:
+    """AI vs AI 观看模式"""
+
+    def __init__(self, model_path_p1=None, model_path_p2=None, device='cpu'):
+        self.game = FencingGame(render=True)
+
+        # 创建两个AI - 使用自动加载/创建
+        self.agent1 = DQNAgent.load_or_create(
+            model_path_p1 or 'models/agent_p1_final.pth',
+            player_id=1, device=device
+        )
+        self.agent2 = DQNAgent.load_or_create(
+            model_path_p2 or 'models/agent_p2_final.pth',
+            player_id=2, device=device
+        )
+        self.agent1.training = False
+        self.agent2.training = False
+
+        self.running = True
+        self.frame_count = 0
+        self._ai1_idx = 0
+        self._ai2_idx = 0
+        self.game.create_players()
+
+    def run(self):
+        """运行AI对战"""
+        print(f"\n{'='*50}")
+        print("  AI vs AI 对战模式")
+        print(f"{'='*50}")
+        print("  按 ESC 退出 | 按 R 重新开始")
+        print(f"{'='*50}\n")
+
+        while self.running:
+            events = self.game.handle_events()
+            for event in events:
+                if event == 'quit':
+                    self.running = False
+                    return
+                elif event == 'reset':
+                    self.game.reset()
+
+            if not self.game.game_over:
+                # 获取状态(AI每3帧决策)
+                if self.frame_count % 3 == 0:
+                    state_1 = self.game.get_state_for_agent(1)
+                    state_2 = self.game.get_state_for_agent(2)
+                    if state_1 is not None and state_2 is not None:
+                        self._ai1_idx = self.agent1.select_action(state_1, eval_mode=True)
+                        self._ai2_idx = self.agent2.select_action(state_2, eval_mode=True)
+
+                action_1 = self.agent1.get_action_tuple(self._ai1_idx)
+                action_2 = self.agent2.get_action_tuple(self._ai2_idx)
+                self.frame_count += 1
+
+                # 执行一步(AI不翻转朝向)
+
+            self.game.render_frame()
+
+        self.game.close()
 
 
 def main():
-    """主入口"""
+    """入口"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='火柴人击剑格斗 - 对战模式')
     parser.add_argument('--mode', type=str, default='human_vs_ai',
                        choices=['human_vs_ai', 'ai_vs_ai'],
                        help='对战模式')
-    parser.add_argument('--model1', type=str, default='',
-                       help='智能体1模型路径 (P1)')
-    parser.add_argument('--model2', type=str, default='',
-                       help='智能体2模型路径 (P2)')
-    
+    parser.add_argument('--model', type=str, default='models/agent_p1_final.pth',
+                       help='AI模型路径')
+    parser.add_argument('--model-p2', type=str, default=None,
+                       help='玩家2AI模型路径 (AI vs AI模式)')
     args = parser.parse_args()
-    
+
     if args.mode == 'human_vs_ai':
-        human_vs_ai(model_path=args.model2 if args.model2 else '')
+        game = HumanVsAI(model_path=args.model)
+        game.run()
     elif args.mode == 'ai_vs_ai':
-        ai_vs_ai(model1_path=args.model1, model2_path=args.model2)
+        game = AIVsAI(model_path_p1=args.model, model_path_p2=args.model_p2)
+        game.run()
 
 
 if __name__ == '__main__':

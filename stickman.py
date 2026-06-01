@@ -1,623 +1,295 @@
 """
-火柴人角色 - 使用 PyMunk 物理引擎实现关节式身体
-类似 Bloody Bastards 的 ragdoll 物理风格
+火柴人物理 - 躯干主体 + 头紧贴 + 双段四肢 + 轻柔弹簧
 """
 import math
 import pymunk
 from pymunk import Vec2d
-from game_config import *
+import game_config as cfg
+
 
 class StickMan:
-    """基于PyMunk物理的火柴人角色"""
-    
-    def __init__(self, space, x, y, facing_right=True, color_scheme='player1'):
+
+    def __init__(self, space, x, y, facing_right=True, player_id=1):
         self.space = space
-        self.facing = 1 if facing_right else -1
-        color_key = 'player1' if color_scheme == 'player1' else 'player2'
-        self.body_color = COLORS[f'{color_key}_body']
-        self.head_color = COLORS[f'{color_key}_head']
-        self.sword_color = COLORS[f'{color_key}_sword']
-        self.armor_color = COLORS[f'{color_key}_armor']
-        
-        # 战斗状态
-        self.health = FIGHT['max_health']
-        self.max_health = FIGHT['max_health']
-        self.attack_cooldown = 0
-        self.blocking = False
-        self.stun_timer = 0
-        self.alive = True
-        self.damage_dealt_this_step = 0  # 本步造成的伤害 (用于奖励)
-        
-        # 存储所有身体部件
-        self.bodies = {}      # 物理body
-        self.shapes = []      # 所有shape
-        self.joints = []      # 所有关节
-        self.part_positions = {}  # 记录相对位置
-        
-        # 碰撞组 - 同组不碰撞 (防止自碰撞)
-        self.collision_group = id(self)
-        self._move_direction = 0
-        
+        self.player_id = player_id
+        self.facing_right = facing_right
+        self.health = cfg.MAX_HEALTH
+        self.max_health = cfg.MAX_HEALTH
+        self.COLL_BODY = 1; self.COLL_SWORD = 2; self.COLL_SHIELD = 3
+        self.COLL_GROUND = 4; self.COLL_HEAD = 5
+        self.bodies = {}
+        self.shapes = {}
+        self.joints = []
+        self.sword_body = None; self.sword_shape = None
+        self.shield_body = None; self.shield_shape = None
+        self.is_attacking = False; self.attack_cooldown_timer = 0
+        self.is_blocking = False
         self._build_body(x, y)
-        self._build_joints()
-        self._create_sword(x, y)
-        
-    def _apply_collision_filter(self, shape):
-        """应用碰撞过滤 - 防止自碰撞"""
-        shape.filter = pymunk.ShapeFilter(group=self.collision_group)
-        return shape
-    
+        self.color = cfg.PLAYER1_COLOR if player_id == 1 else cfg.PLAYER2_COLOR
+
+    def _add_box(self, name, mass, size, pos, angle=0, ct=1):
+        body = pymunk.Body(mass, pymunk.moment_for_box(mass, size))
+        body.position = pos; body.angle = angle
+        shape = pymunk.Poly.create_box(body, size)
+        shape.friction = 0.8; shape.elasticity = 0.1; shape.collision_type = ct
+        shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b1, mask=0b11111)
+        self.space.add(body, shape)
+        self.bodies[name] = body; self.shapes[name] = shape
+        return body, shape
+
+    def _add_circle(self, name, mass, radius, pos, ct=1):
+        body = pymunk.Body(mass, pymunk.moment_for_circle(mass, 0, radius))
+        body.position = pos
+        shape = pymunk.Circle(body, radius)
+        shape.friction = 0.5; shape.elasticity = 0.2; shape.collision_type = ct
+        shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b1, mask=0b11111)
+        self.space.add(body, shape)
+        self.bodies[name] = body; self.shapes[name] = shape
+        return body, shape
+
+    def _pivot(self, ba, bb, a_local, b_local, mf=30000):
+        j = pymunk.PivotJoint(ba, bb, a_local, b_local)
+        j.max_force = mf; j.error_bias = 0.15
+        self.space.add(j); self.joints.append(j)
+        return j
+
+    def _pin(self, ba, bb, a_local, b_local):
+        j = pymunk.PinJoint(ba, bb, a_local, b_local)
+        self.space.add(j); self.joints.append(j)
+        return j
+
+    def _spring(self, ba, bb, ra=0, st=6000, da=600):
+        j = pymunk.DampedRotarySpring(ba, bb, ra, st, da)
+        self.space.add(j); self.joints.append(j)
+        return j
+
     def _build_body(self, x, y):
-        """构建火柴人身体"""
-        s = STICKMAN
-        cx, cy = x, y - 20  # 稍微抬高
-        
-        # === 躯干 (Torso) ===
-        torso_body = pymunk.Body(BODY_PART_MASS['torso'], 
-                                 pymunk.moment_for_box(BODY_PART_MASS['torso'], 
-                                                       (s['torso_width'], s['torso_height'])))
-        torso_body.position = cx, cy - s['torso_height']/2
-        torso_shape = pymunk.Poly.create_box(torso_body, (s['torso_width'], s['torso_height']))
-        torso_shape.elasticity = 0.01
-        torso_shape.friction = 0.5
-        torso_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['torso'] = torso_body
-        self.shapes.append(torso_shape)
-        
-        # === 头部 (Head) ===
-        head_body = pymunk.Body(BODY_PART_MASS['head'],
-                                pymunk.moment_for_circle(BODY_PART_MASS['head'], 0, s['head_radius']))
-        head_body.position = cx, cy - s['torso_height'] - s['head_radius']
-        head_shape = pymunk.Circle(head_body, s['head_radius'])
-        head_shape.elasticity = 0.01
-        head_shape.friction = 0.5
-        head_shape.collision_type = COLLISION_TYPES['head']
-        self.bodies['head'] = head_body
-        self.shapes.append(head_shape)
-        
-        # === 右大臂 (Right Upper Arm) ===
-        uarm_r_body = pymunk.Body(BODY_PART_MASS['upper_arm'],
-                                  pymunk.moment_for_box(BODY_PART_MASS['upper_arm'], 
-                                                        (s['upper_arm_length'], 8)))
-        shoulder_r_x = cx + s['shoulder_width']/2
-        shoulder_r_y = cy - s['torso_height'] * 0.8
-        uarm_r_body.position = shoulder_r_x + s['upper_arm_length']/2, shoulder_r_y
-        uarm_r_shape = pymunk.Poly.create_box(uarm_r_body, (s['upper_arm_length'], 8))
-        uarm_r_shape.elasticity = 0.01
-        uarm_r_shape.friction = 0.5
-        uarm_r_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['upper_arm_r'] = uarm_r_body
-        self.shapes.append(uarm_r_shape)
-        
-        # === 右前臂 (Right Forearm) ===
-        forearm_r_body = pymunk.Body(BODY_PART_MASS['forearm'],
-                                     pymunk.moment_for_box(BODY_PART_MASS['forearm'],
-                                                           (s['forearm_length'], 7)))
-        forearm_r_body.position = shoulder_r_x + s['upper_arm_length'] + s['forearm_length']/2, shoulder_r_y
-        forearm_r_shape = pymunk.Poly.create_box(forearm_r_body, (s['forearm_length'], 7))
-        forearm_r_shape.elasticity = 0.01
-        forearm_r_shape.friction = 0.5
-        forearm_r_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['forearm_r'] = forearm_r_body
-        self.shapes.append(forearm_r_shape)
-        
-        # === 右手 (Right Hand) ===
-        hand_r_body = pymunk.Body(BODY_PART_MASS['hand'],
-                                  pymunk.moment_for_circle(BODY_PART_MASS['hand'], 0, s['hand_radius']))
-        hand_r_body.position = shoulder_r_x + s['upper_arm_length'] + s['forearm_length'] + s['hand_radius'], shoulder_r_y
-        hand_r_shape = pymunk.Circle(hand_r_body, s['hand_radius'])
-        hand_r_shape.elasticity = 0.01
-        hand_r_shape.friction = 0.5
-        hand_r_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['hand_r'] = hand_r_body
-        self.shapes.append(hand_r_shape)
-        
-        # === 左大臂 (Left Upper Arm) ===
-        uarm_l_body = pymunk.Body(BODY_PART_MASS['upper_arm'],
-                                  pymunk.moment_for_box(BODY_PART_MASS['upper_arm'],
-                                                        (s['upper_arm_length'], 8)))
-        shoulder_l_x = cx - s['shoulder_width']/2
-        shoulder_l_y = cy - s['torso_height'] * 0.8
-        uarm_l_body.position = shoulder_l_x - s['upper_arm_length']/2, shoulder_l_y
-        uarm_l_shape = pymunk.Poly.create_box(uarm_l_body, (s['upper_arm_length'], 8))
-        uarm_l_shape.elasticity = 0.01
-        uarm_l_shape.friction = 0.5
-        uarm_l_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['upper_arm_l'] = uarm_l_body
-        self.shapes.append(uarm_l_shape)
-        
-        # === 左前臂 (Left Forearm) ===
-        forearm_l_body = pymunk.Body(BODY_PART_MASS['forearm'],
-                                     pymunk.moment_for_box(BODY_PART_MASS['forearm'],
-                                                           (s['forearm_length'], 7)))
-        forearm_l_body.position = shoulder_l_x - s['upper_arm_length'] - s['forearm_length']/2, shoulder_l_y
-        forearm_l_shape = pymunk.Poly.create_box(forearm_l_body, (s['forearm_length'], 7))
-        forearm_l_shape.elasticity = 0.01
-        forearm_l_shape.friction = 0.5
-        forearm_l_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['forearm_l'] = forearm_l_body
-        self.shapes.append(forearm_l_shape)
-        
-        # === 左手 (Left Hand) ===
-        hand_l_body = pymunk.Body(BODY_PART_MASS['hand'],
-                                  pymunk.moment_for_circle(BODY_PART_MASS['hand'], 0, s['hand_radius']))
-        hand_l_body.position = shoulder_l_x - s['upper_arm_length'] - s['forearm_length'] - s['hand_radius'], shoulder_l_y
-        hand_l_shape = pymunk.Circle(hand_l_body, s['hand_radius'])
-        hand_l_shape.elasticity = 0.01
-        hand_l_shape.friction = 0.5
-        hand_l_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['hand_l'] = hand_l_body
-        self.shapes.append(hand_l_shape)
-        
-        # === 右大腿 (Right Thigh) ===
-        thigh_r_body = pymunk.Body(BODY_PART_MASS['thigh'],
-                                   pymunk.moment_for_box(BODY_PART_MASS['thigh'],
-                                                         (10, s['thigh_length'])))
-        hip_r_x = cx + 8
-        hip_r_y = cy
-        thigh_r_body.position = hip_r_x, hip_r_y + s['thigh_length']/2
-        thigh_r_shape = pymunk.Poly.create_box(thigh_r_body, (10, s['thigh_length']))
-        thigh_r_shape.elasticity = 0.1
-        thigh_r_shape.friction = 0.3
-        thigh_r_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['thigh_r'] = thigh_r_body
-        self.shapes.append(thigh_r_shape)
-        
-        # === 右小腿 (Right Shin) ===
-        shin_r_body = pymunk.Body(BODY_PART_MASS['shin'],
-                                  pymunk.moment_for_box(BODY_PART_MASS['shin'],
-                                                        (9, s['shin_length'])))
-        shin_r_body.position = hip_r_x, hip_r_y + s['thigh_length'] + s['shin_length']/2
-        shin_r_shape = pymunk.Poly.create_box(shin_r_body, (9, s['shin_length']))
-        shin_r_shape.elasticity = 0.01
-        shin_r_shape.friction = 0.5
-        shin_r_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['shin_r'] = shin_r_body
-        self.shapes.append(shin_r_shape)
-        
-        # === 左大腿 (Left Thigh) ===
-        thigh_l_body = pymunk.Body(BODY_PART_MASS['thigh'],
-                                   pymunk.moment_for_box(BODY_PART_MASS['thigh'],
-                                                         (10, s['thigh_length'])))
-        hip_l_x = cx - 8
-        hip_l_y = cy
-        thigh_l_body.position = hip_l_x, hip_l_y + s['thigh_length']/2
-        thigh_l_shape = pymunk.Poly.create_box(thigh_l_body, (10, s['thigh_length']))
-        thigh_l_shape.elasticity = 0.01
-        thigh_l_shape.friction = 0.3
-        thigh_l_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['thigh_l'] = thigh_l_body
-        self.shapes.append(thigh_l_shape)
-        
-        # === 左小腿 (Left Shin) ===
-        shin_l_body = pymunk.Body(BODY_PART_MASS['shin'],
-                                  pymunk.moment_for_box(BODY_PART_MASS['shin'],
-                                                        (9, s['shin_length'])))
-        shin_l_body.position = hip_l_x, hip_l_y + s['thigh_length'] + s['shin_length']/2
-        shin_l_shape = pymunk.Poly.create_box(shin_l_body, (9, s['shin_length']))
-        shin_l_shape.elasticity = 0.01
-        shin_l_shape.friction = 0.3
-        shin_l_shape.collision_type = COLLISION_TYPES['body']
-        self.bodies['shin_l'] = shin_l_body
-        self.shapes.append(shin_l_shape)
-        
-        # 对所有身体部件应用移动速度函数 - 使整体移动
-        for name, body in self.bodies.items():
-            body.velocity_func = self._apply_move_velocity
-        
-        # 应用碰撞过滤到所有形状 - 防止自碰撞
-        for shape in self.shapes:
-            self._apply_collision_filter(shape)
-        
-        # 将所有部件加入空间
-        for body in self.bodies.values():
-            self.space.add(body)
-        for shape in self.shapes:
-            self.space.add(shape)
-    
-    def _build_joints(self):
-        """构建关节连接"""
-        s = STICKMAN
-        cx = self.bodies['torso'].position.x
-        cy = self.bodies['torso'].position.y + s['torso_height']/2
-        
-        # 颈部: 头部->躯干
-        neck_pos = (cx, cy - s['torso_height'])
-        j = pymunk.PinJoint(self.bodies['head'], self.bodies['torso'], 
-                           (0, s['head_radius']), (0, -s['torso_height']/2))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 肩关节: 大臂->躯干 (使用RotaryLimitJoint限制角度)
-        shoulder_r_pos = (cx + s['shoulder_width']/2, cy - s['torso_height'] * 0.8)
-        
-        # 对于右上臂,用PivotJoint固定到肩膀
-        j = pymunk.PivotJoint(self.bodies['torso'], self.bodies['upper_arm_r'],
-                             (s['shoulder_width']/2, -s['torso_height'] * 0.8 + s['torso_height']/2),
-                             (-s['upper_arm_length']/2, 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 右肘关节
-        j = pymunk.PivotJoint(self.bodies['upper_arm_r'], self.bodies['forearm_r'],
-                             (s['upper_arm_length']/2, 0), (-s['forearm_length']/2, 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 右腕关节
-        j = pymunk.PivotJoint(self.bodies['forearm_r'], self.bodies['hand_r'],
-                             (s['forearm_length']/2, 0), (-s['hand_radius'], 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左肩关节
-        shoulder_l_pos = (cx - s['shoulder_width']/2, cy - s['torso_height'] * 0.8)
-        j = pymunk.PivotJoint(self.bodies['torso'], self.bodies['upper_arm_l'],
-                             (-s['shoulder_width']/2, -s['torso_height'] * 0.8 + s['torso_height']/2),
-                             (s['upper_arm_length']/2, 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左肘关节
-        j = pymunk.PivotJoint(self.bodies['upper_arm_l'], self.bodies['forearm_l'],
-                             (-s['upper_arm_length']/2, 0), (s['forearm_length']/2, 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左腕关节
-        j = pymunk.PivotJoint(self.bodies['forearm_l'], self.bodies['hand_l'],
-                             (-s['forearm_length']/2, 0), (s['hand_radius'], 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 右髋关节
-        j = pymunk.PivotJoint(self.bodies['torso'], self.bodies['thigh_r'],
-                             (8, s['torso_height']/2 - 5), (0, -s['thigh_length']/2))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 右膝关节
-        j = pymunk.PivotJoint(self.bodies['thigh_r'], self.bodies['shin_r'],
-                             (0, s['thigh_length']/2), (0, -s['shin_length']/2))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左髋关节
-        j = pymunk.PivotJoint(self.bodies['torso'], self.bodies['thigh_l'],
-                             (-8, s['torso_height']/2 - 5), (0, -s['thigh_length']/2))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左膝关节
-        j = pymunk.PivotJoint(self.bodies['thigh_l'], self.bodies['shin_l'],
-                             (0, s['thigh_length']/2), (0, -s['shin_length']/2))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 使用GearJoint或SimpleMotor来让关节有弹性
-        # 给右臂添加 RotaryLimitJoint 限制摆动范围
-        # 由于RotaryLimitJoint需要两个body都有角度,
-        # 我们用DampedRotarySpring让右臂保持自然下垂
-        j = pymunk.DampedRotarySpring(self.bodies['torso'], self.bodies['upper_arm_r'],
-                                      0, 1000, 50)  # 自然位置0度
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.DampedRotarySpring(self.bodies['upper_arm_r'], self.bodies['forearm_r'],
-                                      0, 800, 40)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 左臂保持弯曲(盾牌手)
-        j = pymunk.DampedRotarySpring(self.bodies['torso'], self.bodies['upper_arm_l'],
-                                      -0.5, 1000, 50)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.DampedRotarySpring(self.bodies['upper_arm_l'], self.bodies['forearm_l'],
-                                      -0.8, 800, 40)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 腿的弹性 - 大幅增强让火柴人能站稳
-        j = pymunk.DampedRotarySpring(self.bodies['torso'], self.bodies['thigh_r'],
-                                      0.1, 30000, 200)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.DampedRotarySpring(self.bodies['thigh_r'], self.bodies['shin_r'],
-                                      0, 25000, 180)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.DampedRotarySpring(self.bodies['torso'], self.bodies['thigh_l'],
-                                      -0.1, 30000, 200)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.DampedRotarySpring(self.bodies['thigh_l'], self.bodies['shin_l'],
-                                      0, 25000, 180)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 给右臂添加 RotaryLimitJoint 限制范围
-        j = pymunk.RotaryLimitJoint(self.bodies['torso'], self.bodies['upper_arm_r'],
-                                    -2.5, 2.5)
-        self.space.add(j)
-        self.joints.append(j)
-        
-        j = pymunk.RotaryLimitJoint(self.bodies['upper_arm_r'], self.bodies['forearm_r'],
-                                    -2.5, 0.5)
-        self.space.add(j)
-        self.joints.append(j)
-    
-    def _create_sword(self, x, y):
-        """创建剑 - 连接在右手上"""
-        s = STICKMAN
-        cx = self.bodies['torso'].position.x
-        cy = self.bodies['torso'].position.y + s['torso_height']/2
-        shoulder_r_x = cx + s['shoulder_width']/2
-        
-        # 剑身: 一个薄的矩形
-        sword_mass = 3.0
-        sword_moment = pymunk.moment_for_box(sword_mass, (SWORD_LENGTH, SWORD_WIDTH))
-        self.sword_body = pymunk.Body(sword_mass, sword_moment)
-        # 剑的位置在右手延伸方向
-        hand_pos = self.bodies['hand_r'].position
-        self.sword_body.position = hand_pos.x + SWORD_LENGTH/2, hand_pos.y
-        self.sword_body.angle = self.facing * (-0.5)  # 剑尖朝上
-        
-        # 剑的碰撞形状
-        sword_verts = [
-            (-SWORD_HANDLE, -SWORD_WIDTH/2),
-            (SWORD_LENGTH - SWORD_HANDLE, -SWORD_WIDTH/2),
-            (SWORD_LENGTH - SWORD_HANDLE, SWORD_WIDTH/2),
-            (-SWORD_HANDLE, SWORD_WIDTH/2),
-        ]
-        self.sword_shape = pymunk.Poly(self.sword_body, sword_verts)
-        self.sword_shape.elasticity = 0.01
-        self.sword_shape.friction = 0.5
-        self.sword_shape.collision_type = COLLISION_TYPES['sword']
-        
-        # 剑的碰撞过滤
-        self._apply_collision_filter(self.sword_shape)
-        
+        f = 1 if self.facing_right else -1
+        tw, th = cfg.TORSO_WIDTH, cfg.TORSO_HEIGHT
+        ual, lal = cfg.UPPER_ARM_LENGTH, cfg.LOWER_ARM_LENGTH
+        ull, lll = cfg.UPPER_LEG_LENGTH, cfg.LOWER_LEG_LENGTH
+        hr = cfg.HEAD_RADIUS
+
+        # ==== 躯干 ====
+        tp = Vec2d(x, y)
+        self._add_box('torso', cfg.TORSO_MASS, (tw, th), tp)
+        # 躯干垂直稳定: SimpleMotor保持上身不倾倒
+        tm = pymunk.SimpleMotor(self.bodies['torso'], self.space.static_body, 0)
+        tm.max_force = 80000; self.space.add(tm); self.joints.append(tm)
+
+        # ==== 头(紧贴,双关节固定) ====
+        hy = y - th/2 - hr
+        self._add_circle('head', cfg.HEAD_MASS, hr, (x, hy), self.COLL_HEAD)
+        self._pivot(self.bodies['head'], self.bodies['torso'], (0, hr), (0, -th/2), 50000)
+        self._pin(self.bodies['head'], self.bodies['torso'], (0, hr+2), (0, -th/2-2))
+
+        # ==== 左上臂 ====
+        lax = x - f*(tw/2 + ual/2); lay = y - th/3
+        self._add_box('left_upper_arm', cfg.UPPER_ARM_MASS, (ual, 8), (lax, lay), math.radians(-15*f))
+        self._pivot(self.bodies['torso'], self.bodies['left_upper_arm'], (-f*tw/2, -th/3), (f*ual/2, 0))
+        self._spring(self.bodies['torso'], self.bodies['left_upper_arm'], math.radians(-20*f), 6000, 600)
+
+        # ==== 左前臂 ====
+        lfx = lax - f*(ual/2 + lal/2); lfy = lay + 8
+        self._add_box('left_lower_arm', cfg.LOWER_ARM_MASS, (lal, 7), (lfx, lfy), math.radians(-30*f))
+        self._pivot(self.bodies['left_upper_arm'], self.bodies['left_lower_arm'], (-f*ual/2, 0), (f*lal/2, 0))
+        self._spring(self.bodies['left_upper_arm'], self.bodies['left_lower_arm'], math.radians(-15*f), 5000, 500)
+
+        # ==== 右上臂(持剑) ====
+        rax = x + f*(tw/2 + ual/2); ray = y - th/3
+        self._add_box('right_upper_arm', cfg.UPPER_ARM_MASS, (ual, 8), (rax, ray), math.radians(15*f))
+        self._pivot(self.bodies['torso'], self.bodies['right_upper_arm'], (f*tw/2, -th/3), (-f*ual/2, 0))
+        self._spring(self.bodies['torso'], self.bodies['right_upper_arm'], math.radians(20*f), 6000, 600)
+
+        # ==== 右前臂(持剑) ====
+        rfx = rax + f*(ual/2 + lal/2); rfy = ray + 8
+        self._add_box('right_lower_arm', cfg.LOWER_ARM_MASS, (lal, 7), (rfx, rfy), math.radians(30*f))
+        self._pivot(self.bodies['right_upper_arm'], self.bodies['right_lower_arm'], (f*ual/2, 0), (-f*lal/2, 0))
+        self._spring(self.bodies['right_upper_arm'], self.bodies['right_lower_arm'], math.radians(15*f), 5000, 500)
+
+        # ==== 左大腿 ====
+        lhx = x - 7; lhy = y + th/2 + ull/2
+        self._add_box('left_upper_leg', cfg.UPPER_LEG_MASS, (10, ull), (lhx, lhy))
+        self._pivot(self.bodies['torso'], self.bodies['left_upper_leg'], (-6, th/2), (0, -ull/2))
+        self._spring(self.bodies['torso'], self.bodies['left_upper_leg'], 0, 8000, 800)
+        # 腿垂直稳定: SimpleMotor强制腿指向地面
+        m = pymunk.SimpleMotor(self.bodies['left_upper_leg'], self.space.static_body, 0)
+        m.max_force = 40000; self.space.add(m); self.joints.append(m)
+
+        # ==== 左小腿 ====
+        lkx = lhx; lky = lhy + ull/2 + lll/2
+        self._add_box('left_lower_leg', cfg.LOWER_LEG_MASS, (8, lll), (lkx, lky))
+        self._pivot(self.bodies['left_upper_leg'], self.bodies['left_lower_leg'], (0, ull/2), (0, -lll/2))
+        self._spring(self.bodies['left_upper_leg'], self.bodies['left_lower_leg'], 0, 6000, 600)
+
+        # ==== 右大腿 ====
+        rhx = x + 7; rhy = y + th/2 + ull/2
+        self._add_box('right_upper_leg', cfg.UPPER_LEG_MASS, (10, ull), (rhx, rhy))
+        self._pivot(self.bodies['torso'], self.bodies['right_upper_leg'], (6, th/2), (0, -ull/2))
+        self._spring(self.bodies['torso'], self.bodies['right_upper_leg'], 0, 8000, 800)
+        m = pymunk.SimpleMotor(self.bodies['right_upper_leg'], self.space.static_body, 0)
+        m.max_force = 40000; self.space.add(m); self.joints.append(m)
+
+        # ==== 右小腿 ====
+        rkx = rhx; rky = rhy + ull/2 + lll/2
+        self._add_box('right_lower_leg', cfg.LOWER_LEG_MASS, (8, lll), (rkx, rky))
+        self._pivot(self.bodies['right_upper_leg'], self.bodies['right_lower_leg'], (0, ull/2), (0, -lll/2))
+        self._spring(self.bodies['right_upper_leg'], self.bodies['right_lower_leg'], 0, 6000, 600)
+
+        # ==== 武器 ====
+        self._create_sword(); self._attach_sword_to_hand()
+        self._create_shield(); self._attach_shield_to_hand()
+
+    def _create_sword(self):
+        hp = self._hand_pos('right')
+        self.sword_body = pymunk.Body(cfg.SWORD_MASS, pymunk.moment_for_box(cfg.SWORD_MASS, (cfg.SWORD_LENGTH, cfg.SWORD_WIDTH)))
+        self.sword_body.position = hp; self.sword_body.angle = math.radians(-90)
+        self.sword_shape = pymunk.Poly.create_box(self.sword_body, (cfg.SWORD_LENGTH, cfg.SWORD_WIDTH))
+        self.sword_shape.friction = 0.7; self.sword_shape.elasticity = 0.05
+        self.sword_shape.collision_type = self.COLL_SWORD
+        self.sword_shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b10, mask=0b11111)
+        self.sword_shape.stickman = self
         self.space.add(self.sword_body, self.sword_shape)
-        
-        # 剑柄连接到右手 - 用PivotJoint
-        j = pymunk.PivotJoint(self.bodies['hand_r'], self.sword_body,
-                             (0, 0), (-SWORD_HANDLE, 0))
-        self.space.add(j)
-        self.joints.append(j)
-        
-        # 用DampedRotarySpring让剑自然下垂
-        j = pymunk.DampedRotarySpring(self.bodies['hand_r'], self.sword_body,
-                                      0, 2000, 30)
-        self.space.add(j)
-        self.joints.append(j)
-    
+
+    def _attach_sword_to_hand(self):
+        hb = self.bodies['right_lower_arm']
+        f = 1 if self.facing_right else -1
+        off = -f * cfg.LOWER_ARM_LENGTH/2
+        # 剑柄(后端)连接手, 剑尖在前
+        self._pivot(hb, self.sword_body, (off-3, 0), (-cfg.SWORD_LENGTH/2+5, 0), 15000)
+        self._pin(hb, self.sword_body, (off-3, 0), (-cfg.SWORD_LENGTH/2+5, 0))
+
+    def _create_shield(self):
+        hp = self._hand_pos('left')
+        self.shield_body = pymunk.Body(cfg.SHIELD_MASS, pymunk.moment_for_box(cfg.SHIELD_MASS, (cfg.SHIELD_WIDTH, cfg.SHIELD_HEIGHT)))
+        self.shield_body.position = hp
+        self.shield_shape = pymunk.Poly.create_box(self.shield_body, (cfg.SHIELD_WIDTH, cfg.SHIELD_HEIGHT))
+        self.shield_shape.friction = 0.8; self.shield_shape.elasticity = 0.1
+        self.shield_shape.collision_type = self.COLL_SHIELD
+        self.shield_shape.filter = pymunk.ShapeFilter(group=self.player_id, categories=0b100, mask=0b11111)
+        self.shield_shape.stickman = self
+        self.space.add(self.shield_body, self.shield_shape)
+
+    def _attach_shield_to_hand(self):
+        hb = self.bodies['left_lower_arm']
+        f = 1 if self.facing_right else -1
+        off = f * cfg.LOWER_ARM_LENGTH/2
+        self._pivot(hb, self.shield_body, (off+3, 0), (-cfg.SHIELD_WIDTH/2, 0), 15000)
+        self._pin(hb, self.shield_body, (off+3, 0), (-cfg.SHIELD_WIDTH/2, 0))
+
+    def _hand_pos(self, side='right'):
+        n = f'{side}_lower_arm'
+        if n in self.bodies:
+            f = 1 if self.facing_right else -1
+            return self.bodies[n].position + Vec2d(f*(cfg.LOWER_ARM_LENGTH/2+5), 0)
+        return self.get_position()
+
+    def get_position(self): return self.bodies['torso'].position
+    def get_head_position(self): return self.bodies['head'].position
+
     def get_sword_tip_position(self):
-        """获取剑尖位置"""
-        local_tip = Vec2d(SWORD_LENGTH - SWORD_HANDLE, 0)
-        return self.sword_body.local_to_world(local_tip)
-    
-    def get_sword_base_position(self):
-        """获取剑柄位置"""
-        local_base = Vec2d(-SWORD_HANDLE, 0)
-        return self.sword_body.local_to_world(local_base)
-    
-    def apply_attack(self, attack_type):
-        """执行攻击 - 对右臂施加力来挥剑 (用于RL动作)"""
-        if self.attack_cooldown > 0 or self.stun_timer > 0:
-            return
-        
-        f = self.facing
-        
-        if attack_type == 1:  # 高右斩 (从上往下劈)
-            force = 5000
-            self.bodies['upper_arm_r'].apply_impulse_at_local_point(
-                (0, -force * 0.5), (0, 0))
-            self.bodies['forearm_r'].apply_impulse_at_local_point(
-                (0, -force * 0.3), (0, 0))
-        elif attack_type == -1:  # 横斩
-            force = 4000
-            self.bodies['upper_arm_r'].apply_impulse_at_local_point(
-                (force * 0.3 * f, 0), (0, 0))
-            self.bodies['forearm_r'].angular_velocity = 5 * f
-        elif attack_type == 2:  # 下斩 (从下往上挑)
-            force = 3000
-            self.bodies['upper_arm_r'].apply_impulse_at_local_point(
-                (0, force * 0.3), (0, 0))
-            self.bodies['forearm_r'].angular_velocity = -8 * f
-        
-        self.attack_cooldown = FIGHT['attack_cooldown']
-    
-    def apply_mouse_swing(self, mouse_world_x, mouse_world_y, mouse_dx, mouse_dy, mouse_down):
-        """鼠标控制挥剑 - 鼠标位置控制手臂指向, 拖动速度决定力度
-           mouse_world_x/y: 鼠标在游戏世界中的位置
-           mouse_dx/dy: 鼠标帧间移动距离 (速度)
-           mouse_down: 鼠标是否按下
-        """
-        if self.stun_timer > 0:
-            return
-        
-        s = STICKMAN
-        # 计算肩膀位置 (世界坐标)
-        shoulder = self.bodies['torso'].local_to_world(
-            (self.facing * s['shoulder_width']/2, -s['torso_height'] * 0.8 + s['torso_height']/2))
-        
-        # 计算从肩膀到鼠标的向量
-        dx = mouse_world_x - shoulder.x
-        dy = mouse_world_y - shoulder.y
-        
-        # 计算目标角度
-        target_angle = math.atan2(dy, dx) - math.pi/2  # 转换为关节角度
-        
-        # 鼠标移动速度 = 挥剑力度
-        mouse_speed = math.sqrt(mouse_dx**2 + mouse_dy**2)
-        
-        if mouse_down and mouse_speed > 5:
-            # 鼠标按下拖动 = 挥剑
-            # 角度差
-            current_angle = self.bodies['upper_arm_r'].angle
-            angle_diff = target_angle - current_angle
-            
-            # 鼠标方向决定挥砍方向
-            swing_force = min(mouse_speed * 5, 8000)
-            
-            # 对肩膀施加角力
-            self.bodies['upper_arm_r'].apply_impulse_at_local_point(
-                (0, -swing_force * math.sin(angle_diff)), (0, 0))
-            self.bodies['upper_arm_r'].angular_velocity += angle_diff * 3
-            
-            # 前臂跟随
-            forearm_angle = self.bodies['forearm_r'].angle
-            f_diff = (target_angle * 0.7) - forearm_angle
-            self.bodies['forearm_r'].angular_velocity += f_diff * 2
-            
-            self.attack_cooldown = 0  # 鼠标控制无冷却
-        elif mouse_down:
-            # 鼠标按下但没大幅移动 = 格挡/指向
-            current_angle = self.bodies['upper_arm_r'].angle
-            angle_diff = target_angle - current_angle
-            self.bodies['upper_arm_r'].angular_velocity += angle_diff * 5
-            self.bodies['forearm_r'].angular_velocity += (target_angle * 0.6 - self.bodies['forearm_r'].angle) * 3
-            self.blocking = True
-        else:
-            self.blocking = False
-    
-    def apply_block(self, blocking):
-        """执行格挡 - 抬起右臂"""
-        self.blocking = blocking
-        if blocking:
-            # 抬起右臂做格挡姿势
-            self.bodies['upper_arm_r'].angular_velocity = -3 * self.facing
-            self.bodies['forearm_r'].angular_velocity = -2 * self.facing
-    
-    def move(self, direction):
-        """移动: 速度驱动, 避免Teleport撕裂关节"""
-        if self.stun_timer > 0:
-            return
-        
-        target_vx = FIGHT['move_speed'] * direction * self.facing
-        for name, body in self.bodies.items():
-            body.velocity = (target_vx, body.velocity.y)
-        if hasattr(self, 'sword_body'):
-            self.sword_body.velocity = (target_vx, self.sword_body.velocity.y)
-    
-    def _apply_move_velocity(self, body, gravity, damping, dt):
-        """自定义速度函数 - 移动由move()直接处理, 同时稳定躯干姿态"""
-        # 先应用正常重力
-        pymunk.Body.update_velocity(body, gravity, damping, dt)
-        # 躯干稳定: 抑制水平旋转速度, 让躯干保持竖直
-        if body == self.bodies.get('torso'):
-            # 强阻尼抑制旋转
-            body.angular_velocity *= 0.7
-            # 如果倾斜过大, 施加回复力矩
-            if abs(body.angle) > 0.15:
-                body.angular_velocity -= body.angle * 10
-    
-    def take_damage(self, damage, impulse=None):
-        """受到伤害"""
-        actual_damage = damage
-        if self.blocking:
-            actual_damage = damage * (1 - FIGHT['block_damage_reduction'])
-        
-        self.health -= actual_damage
-        self.stun_timer = FIGHT['stun_duration']
-        
-        # 击退效果
-        if impulse:
-            self.bodies['torso'].apply_impulse_at_world_point(impulse, self.bodies['torso'].position)
-        
-        if self.health <= 0:
-            self.health = 0
-            self.alive = False
-    
-    def deal_damage(self, amount):
-        """记录本步造成的伤害"""
-        self.damage_dealt_this_step += amount
-    
-    def get_center_x(self):
-        """获取角色的X中心位置"""
-        return self.bodies['torso'].position.x
-    
-    def get_center_y(self):
-        return self.bodies['torso'].position.y
-    
-    def get_sword_velocity(self):
-        """获取剑尖速度 (用于计算伤害)"""
-        tip = self.get_sword_tip_position()
-        return self.sword_body.velocity_at_world_point(tip).length
-    
-    def update(self, dt):
-        self.damage_dealt_this_step = 0  # 每帧重置伤害计数
-        """每帧更新"""
-        if self.attack_cooldown > 0:
-            self.attack_cooldown -= dt
-        if self.stun_timer > 0:
-            self.stun_timer -= dt
-    
-    def reset_position(self, x, y):
-        """重置位置"""
-        s = STICKMAN
-        cx, cy = x, y - 20
-        
-        positions = {
-            'torso': (cx, cy - s['torso_height']/2),
-            'head': (cx, cy - s['torso_height'] - s['head_radius']),
-            'upper_arm_r': (cx + s['shoulder_width']/2 + s['upper_arm_length']/2, 
-                           cy - s['torso_height'] * 0.8),
-            'forearm_r': (cx + s['shoulder_width']/2 + s['upper_arm_length'] + s['forearm_length']/2,
-                         cy - s['torso_height'] * 0.8),
-            'hand_r': (cx + s['shoulder_width']/2 + s['upper_arm_length'] + s['forearm_length'] + s['hand_radius'],
-                      cy - s['torso_height'] * 0.8),
-            'upper_arm_l': (cx - s['shoulder_width']/2 - s['upper_arm_length']/2,
-                           cy - s['torso_height'] * 0.8),
-            'forearm_l': (cx - s['shoulder_width']/2 - s['upper_arm_length'] - s['forearm_length']/2,
-                         cy - s['torso_height'] * 0.8),
-            'hand_l': (cx - s['shoulder_width']/2 - s['upper_arm_length'] - s['forearm_length'] - s['hand_radius'],
-                      cy - s['torso_height'] * 0.8),
-            'thigh_r': (cx + 8, cy + s['thigh_length']/2),
-            'shin_r': (cx + 8, cy + s['thigh_length'] + s['shin_length']/2),
-            'thigh_l': (cx - 8, cy + s['thigh_length']/2),
-            'shin_l': (cx - 8, cy + s['thigh_length'] + s['shin_length']/2),
-        }
-        
-        for name, pos in positions.items():
-            if name in self.bodies:
-                self.bodies[name].position = pos
-                self.bodies[name].velocity = (0, 0)
-                self.bodies[name].angular_velocity = 0
-                self.bodies[name].angle = 0  # 重置角度
-        
-        # 重置剑
-        hand_pos = self.bodies['hand_r'].position
-        self.sword_body.position = hand_pos.x + SWORD_LENGTH/2, hand_pos.y
-        self.sword_body.velocity = (0, 0)
-        self.sword_body.angular_velocity = 0
-        self.sword_body.angle = self.facing * (-0.5)
-        
-        # 重置状态
-        self.health = self.max_health
-        self.alive = True
-        self.attack_cooldown = 0
-        self.blocking = False
-        self.stun_timer = 0
-        self.damage_dealt_this_step = 0
-    
-    def remove_from_space(self):
-        """从物理空间移除 (先joints, 再shapes, 最后bodies)"""
-        for joint in self.joints:
-            if joint in self.space.constraints:
-                self.space.remove(joint)
-        if hasattr(self, 'sword_shape') and self.sword_shape in self.space.shapes:
-            self.space.remove(self.sword_shape)
-        for shape in self.shapes:
-            if shape in self.space.shapes:
-                self.space.remove(shape)
-        if hasattr(self, 'sword_body') and self.sword_body in self.space.bodies:
-            self.space.remove(self.sword_body)
-        for body in self.bodies.values():
-            if body in self.space.bodies:
-                self.space.remove(body)
+        if self.sword_body: return self.sword_body.local_to_world((cfg.SWORD_LENGTH/2, 0))
+        return self.get_position()
+
+    def apply_movement(self, move_x=0, move_y=0, jump=False, attack=False, block=False):
+        torso = self.bodies['torso']
+        force = 10000.0
+
+        # 限速
+        v = torso.velocity; mx, my = 400, 500
+        if abs(v.x) > mx: torso.velocity = Vec2d(math.copysign(mx, v.x), v.y)
+        if abs(v.y) > my: torso.velocity = Vec2d(v.x, math.copysign(my, v.y))
+        # 辅助扶正(SimpleMotor控角速度, 扭矩控角度)
+        a = torso.angle
+        if abs(a) > 0.1: torso.torque += -a * 50000.0
+
+        if move_x != 0:
+            torso.apply_force_at_local_point((move_x*force, 0), (0, 0))
+            for leg in ['left_upper_leg', 'right_upper_leg']:
+                self.bodies[leg].apply_force_at_local_point((move_x*force*0.2, 0), (0, 0))
+
+        # 跳跃: 仅当躯干在地面附近时才能跳
+        if jump and torso.position.y > cfg.GROUND_Y - 80:
+            torso.apply_impulse_at_local_point((0, -25000), (0, 0))
+
+        if attack and self.attack_cooldown_timer <= 0:
+            self._perform_attack()
+        if block: self._perform_block()
+        else: self.is_blocking = False
+        if self.attack_cooldown_timer > 0:
+            self.attack_cooldown_timer -= 1/cfg.FPS
+
+    def _perform_attack(self):
+        self.is_attacking = True; self.attack_cooldown_timer = cfg.ATTACK_COOLDOWN
+        d = 1 if self.facing_right else -1
+        self.sword_body.angular_velocity += d*35.0
+        self.sword_body.torque = d*cfg.ATTACK_TORQUE*0.5
+        self.sword_body.apply_impulse_at_world_point(Vec2d(d*300, -150), self.get_sword_tip_position())
+        self.bodies['right_upper_arm'].angular_velocity += d*10.0
+        self.bodies['right_upper_arm'].torque += d*50000
+
+    def _perform_block(self):
+        self.is_blocking = True
+        d = 1 if self.facing_right else -1
+        if self.shield_body:
+            self.shield_body.apply_force_at_world_point(Vec2d(d*4000, -1000), self.shield_body.position)
+
+    def aim_arm_at(self, tx, ty):
+        shoulder = self.bodies['right_upper_arm'].position
+        angle = math.atan2(ty-shoulder.y, tx-shoulder.x)
+        diff = angle - self.bodies['right_upper_arm'].angle
+        diff = max(min(diff, 0.5), -1.0)
+        self.bodies['right_upper_arm'].torque = diff * 40000
+
+    def take_damage(self, damage, hit_point=None):
+        if self.is_blocking: damage *= (1-cfg.SHIELD_BLOCK_DAMAGE_REDUCTION)
+        if hit_point and self._is_head_hit(hit_point): damage *= cfg.HEAD_DAMAGE_MULTIPLIER
+        self.health -= damage
+        if self.health < 0: self.health = 0
+        return self.health <= 0
+
+    def _is_head_hit(self, hp):
+        return self.bodies['head'].position.get_distance(hp) < cfg.HEAD_RADIUS*2
+
+    def is_alive(self): return self.health > 0
+    def get_health_ratio(self): return self.health/self.max_health
+
+    def get_sword_tip_velocity(self):
+        if self.sword_body:
+            return self.sword_body.velocity_at_world_point(self.get_sword_tip_position())
+        return Vec2d(0, 0)
+
+    def get_state_vector(self, enemy_pos):
+        p = self.get_position(); h = self.get_head_position()
+        er = enemy_pos - p; d = min(er.get_distance((0,0))/500.0, 1.0)
+        return [
+            p.x/cfg.WINDOW_WIDTH, p.y/cfg.WINDOW_HEIGHT,
+            self.bodies['torso'].velocity.x/300, self.bodies['torso'].velocity.y/300,
+            er.x/cfg.WINDOW_WIDTH, er.y/cfg.WINDOW_HEIGHT, d,
+            self.health/self.max_health,
+            enemy_pos.x/cfg.WINDOW_WIDTH, enemy_pos.y/cfg.WINDOW_HEIGHT,
+            self.sword_body.angle%(2*math.pi)/(2*math.pi) if self.sword_body else 0,
+            self.sword_body.angular_velocity/15 if self.sword_body else 0,
+            h.x/cfg.WINDOW_WIDTH, h.y/cfg.WINDOW_HEIGHT,
+            self.bodies['head'].velocity.x/200, self.bodies['head'].velocity.y/200,
+            1.0 if self.is_attacking else 0, 1.0 if self.is_blocking else 0,
+            self.bodies['torso'].angle/math.pi,
+            self.bodies['right_upper_arm'].angle/math.pi,
+            self.bodies['left_upper_arm'].angle/math.pi,
+            self.shield_body.angle/math.pi if self.shield_body else 0,
+            self.sword_body.velocity.x/300 if self.sword_body else 0,
+            self.sword_body.velocity.y/300 if self.sword_body else 0,
+        ]
+
+    def remove(self):
+        for sn, s in list(self.shapes.items()):
+            b = self.bodies.get(sn)
+            if s in self.space.shapes: self.space.remove(s)
+            if b and b in self.space.bodies: self.space.remove(b)
+        for j in self.joints:
+            if j in self.space.constraints: self.space.remove(j)
+        if self.sword_shape and self.sword_shape in self.space.shapes: self.space.remove(self.sword_shape)
+        if self.sword_body and self.sword_body in self.space.bodies: self.space.remove(self.sword_body)
+        if self.shield_shape and self.shield_shape in self.space.shapes: self.space.remove(self.shield_shape)
+        if self.shield_body and self.shield_body in self.space.bodies: self.space.remove(self.shield_body)
+        self.bodies.clear(); self.shapes.clear(); self.joints.clear()

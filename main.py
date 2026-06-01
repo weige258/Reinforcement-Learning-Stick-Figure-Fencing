@@ -1,88 +1,129 @@
 """
-火柴人击剑格斗 - Bloody Bastards 风格
-强化学习 + PyMunk物理引擎 + Pygame渲染
+火柴人击剑格斗游戏 - 主入口
+基于Bloody Bastards风格，使用PyMunk物理引擎 + PyTorch DQN强化学习
 
-用法:
-  python main.py          # 显示菜单选择
-  python main.py 1        # 直接进入训练
-  python main.py 2        # 直接进入人机对战
+操作说明:
+  WASD 移动 | 鼠标左键 挥剑 | 鼠标右键 举盾
+
+参考论文:
+  - Creating Pro-Level AI for a Real-Time Fighting Game Using DRL (2019)
+  - Diversity-based DRL for Fighting Game AI (2022)
+  - MAAIP: Multi-Agent Adversarial Interaction Priors (2023)
 """
 import sys
 import os
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import game_config as cfg
 
 
 def print_banner():
-    print("""
+    """打印游戏标题"""
+    banner = """
     ╔══════════════════════════════════════════════════╗
-    ║       ⚔️ 火柴人击剑格斗 - RL 强化学习 ⚔️        ║
-    ║     Bloody Bastards 风格物理引擎格斗游戏         ║
-    ║        PyMunk + PyTorch + Pygame               ║
+    ║         ⚔ 火柴人击剑格斗 ⚔                       ║
+    ║     Bloody Bastards 风格 · PyMunk物理引擎        ║
+    ║     PyTorch DQN 强化学习 · 自对弈训练             ║
     ╚══════════════════════════════════════════════════╝
-    """)
+
+    参考论文:
+      [1] Pro-Level Fighting Game AI - DRL (2019)
+      [2] Diversity-based DRL for Fighting Game AI (2022)
+      [3] MAAIP - Multi-Agent Adversarial Interaction Priors (2023)
+
+    """
+    print(banner)
 
 
-def show_menu():
-    """显示交互菜单"""
-    print("=" * 50)
-    print("  ⚔️  请选择模式:")
-    print("  " + "─" * 46)
-    print("   1️⃣   训练        (多局AI自我对抗, 宫格视图)")
-    print("   2️⃣   人机对战    (你 vs AI, 鼠标+键盘)")
-    print("  " + "─" * 46)
-    print("  输入 1 或 2 后回车: ", end="", flush=True)
-    try:
-        choice = input().strip()
-        return choice
-    except (EOFError, KeyboardInterrupt):
-        return ""
+def print_help():
+    """打印帮助信息"""
+    help_text = """
+    可用命令:
+
+      python main.py --mode play         人机对战（默认）
+      python main.py --mode train        无界面训练
+      python main.py --mode train_vs     带界面训练
+      python main.py --mode eval         评估AI
+      python main.py --mode ai_vs_ai     AI互相对战观看
+
+    参数:
+      --episodes N   训练回合数 (默认: 500)
+      --model PATH   AI模型路径 (默认: models/agent_p1_final.pth)
+      --no-render    训练时不显示画面
+
+    示例:
+      python main.py --mode train --episodes 1000
+      python main.py --mode play --model models/agent_p1_best.pth
+      python main.py --mode ai_vs_ai --model models/agent_p1_final.pth
+    """
+    print(help_text)
 
 
-def find_best_model():
-    """自动寻找最佳模型"""
-    models_dir = os.path.join(os.path.dirname(__file__), 'models')
-    if not os.path.exists(models_dir):
-        return ''
-    files = [f for f in os.listdir(models_dir)
-             if f.startswith('agent_p2') and f.endswith('.pth')]
-    if not files:
-        return ''
-    preferred = [f for f in files if 'episode' in f or 'final' in f]
-    return os.path.join(models_dir, (preferred or files)[0])
-
-
-def mode_train():
-    """多宫格训练模式"""
-    print("\n🔥 启动多宫格训练 (同时监控多局AI训练)...")
-    print("  提示: 按 ESC 或关闭窗口可停止并保存模型\n")
-    from multi_viewer import start_multi_training
-    start_multi_training(grid_rows=3, grid_cols=3)
-
-
-def mode_play():
-    """人机对战模式"""
-    print("\n🎮 启动人机对战模式...")
-    print("  鼠标拖拽挥剑 | WASD移动 | Space重置 | ESC退出\n")
-    from play import human_vs_ai
-    human_vs_ai(model_path=find_best_model())
+def run_mode(mode, model='models/agent_p1_final.pth', model_p2=None, episodes=500, render=True):
+    """运行指定模式"""
+    if mode == 'play':
+        from play import HumanVsAI
+        game = HumanVsAI(model_path=model)
+        game.run()
+    elif mode == 'train':
+        from train import Trainer, MultiTrainer
+        # 从菜单中选择训练 = 9宫格模式, 命令行 --mode train 可选渲染
+        trainer = MultiTrainer(total_episodes=episodes) if render else Trainer(render=render, total_episodes=episodes)
+        trainer.train()
+    elif mode == 'ai_vs_ai':
+        from play import AIVsAI
+        game = AIVsAI(model_path_p1=model, model_path_p2=model_p2)
+        game.run()
+    elif mode == 'exit':
+        print("感谢游玩!")
+        sys.exit(0)
 
 
 def main():
-    print_banner()
+    """主入口 - 先显示菜单，再进入对应模式"""
+    import argparse
 
-    if len(sys.argv) > 1 and sys.argv[1] in ("1", "2"):
-        choice = sys.argv[1]
-    else:
-        choice = show_menu()
+    parser = argparse.ArgumentParser(
+        description='火柴人击剑格斗 - Bloody Bastards风格',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--mode', type=str, default=None,
+                       choices=['play', 'train', 'train_vs', 'eval', 'ai_vs_ai'],
+                       help='直接进入模式（跳过菜单）')
+    parser.add_argument('--episodes', type=int, default=500, help='训练回合数')
+    parser.add_argument('--model', type=str, default='models/agent_p1_final.pth', help='AI模型路径')
+    parser.add_argument('--model-p2', type=str, default=None, help='玩家2AI模型路径')
+    parser.add_argument('--no-render', action='store_true', help='训练时不显示画面')
 
-    if choice == "1":
-        mode_train()
-    elif choice == "2":
-        mode_play()
+    args = parser.parse_args()
+
+    # 如果命令行指定了模式，直接运行
+    if args.mode:
+        print_banner()
+        mode = args.mode
+        if mode == 'train_vs':
+            mode = 'train'
+            args.no_render = False
+        run_mode(mode, args.model, args.model_p2, args.episodes, not args.no_render)
+        return
+
+    # 否则显示菜单
+    import pygame
+    pygame.init()
+    screen = pygame.display.set_mode((cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT))
+    pygame.display.set_caption('⚔ 火柴人击剑格斗')
+
+    from menu import Menu
+    menu = Menu(screen)
+    mode = menu.run()
+
+    if mode == 'exit':
+        pygame.quit()
+        sys.exit(0)
+
+    # 运行选择的模式
+    if mode == 'train':
+        run_mode('train', episodes=args.episodes, render=True)
     else:
-        print("\n❌ 无效选择, 默认进入人机对战\n")
-        mode_play()
+        run_mode(mode)
 
 
 if __name__ == '__main__':
